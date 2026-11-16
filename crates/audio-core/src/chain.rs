@@ -1,0 +1,339 @@
+//! 链路拼装与链路描述（P1-2）。
+//!
+//! 两个东西：
+//!
+//! - [`ChainDesc`]：**可复现的实验描述**。`"none"` / `"rnn"` / `"rnn,agc2"` / `"dfn3,agc2,opus"`，
+//!   解析成档位列表并能算出总延迟。它让「同一个实验」可以写进报告、粘进 `measurements.md`、
+//!   在 `testkit` 里复跑；
+//! - [`Chain`]：真正跑帧的容器。构造期把各档 [`Stage`] 装进去，`process` 里按顺序原地处理。
+//!
+//! 延迟口径：`ChainDesc::total_latency_ms()` 与 `Chain::total_latency_ms()` 必须一致，
+//! 否则「文档里写的链路」与「跑起来的链路」会对不上账。
+
+use std::fmt;
+
+use crate::{Frame, Stage, samples_to_ms};
+
+/// 一个档位（可组合成链路的最小单位）。
+///
+/// `Opus` 不是 [`Stage`]（它吃帧吐字节），但它的 6.5 ms 前瞻同样是延迟预算的一行，
+/// 所以也列在档位里——否则报告里 `algorithm_ms` 会少算 6.5 ms。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StageKind {
+    /// 80 Hz 二阶高通（去隆隆声与桌面震动），0 延迟。
+    Highpass,
+    /// `sonora-agc2` 自适应增益 + 限幅，0 延迟。
+    Agc2,
+    /// RNNoise（`nnnoiseless`），10 ms 算法延迟。
+    Rnn,
+    /// DeepFilterNet3（`deep-filter-rt`），30 ms 算法延迟。
+    Dfn3,
+    /// Opus 编解码前瞻，6.5 ms（312 样本）。
+    Opus,
+}
+
+impl StageKind {
+    /// 全部合法档位名，用于报错时列出可选值。
+    pub const ALL: [Self; 5] = [
+        Self::Highpass,
+        Self::Agc2,
+        Self::Rnn,
+        Self::Dfn3,
+        Self::Opus,
+    ];
+
+    /// 档位名（与 CLI 的 `--chain`、报告 JSON、`Stage::name()` 保持一致）。
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Highpass => "highpass",
+            Self::Agc2 => "agc2",
+            Self::Rnn => "rnn",
+            Self::Dfn3 => "dfn3",
+            Self::Opus => "opus",
+        }
+    }
+
+    /// 该档位引入的算法延迟（样本数）。
+    #[must_use]
+    pub fn latency_samples(self) -> usize {
+        match self {
+            Self::Highpass | Self::Agc2 => 0,
+            Self::Rnn => 480,
+            Self::Dfn3 => 1_440,
+            Self::Opus => 312,
+        }
+    }
+
+    /// 按名字解析档位。
+    pub fn parse(name: &str) -> Result<Self, ChainParseError> {
+        match name {
+            "highpass" => Ok(Self::Highpass),
+            "agc2" => Ok(Self::Agc2),
+            "rnn" => Ok(Self::Rnn),
+            "dfn3" => Ok(Self::Dfn3),
+            "opus" => Ok(Self::Opus),
+            other => Err(ChainParseError::UnknownStage {
+                name: other.to_owned(),
+            }),
+        }
+    }
+}
+
+/// 链路描述解析失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainParseError {
+    /// 出现了未知档位名。
+    UnknownStage {
+        /// 原始输入里的那一段。
+        name: String,
+    },
+}
+
+impl fmt::Display for ChainParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownStage { name } => {
+                let valid: Vec<&str> = StageKind::ALL.iter().map(|k| k.name()).collect();
+                write!(f, "未知档位 {name:?}，可选值：{}", valid.join(", "))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChainParseError {}
+
+/// 链路描述：一串档位。空链路用 `"none"` 表示。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChainDesc {
+    stages: Vec<StageKind>,
+}
+
+impl ChainDesc {
+    /// 解析 `"none"` / `"rnn"` / `"rnn,agc2"` 这类描述。
+    ///
+    /// 容忍首尾空白与多余逗号（`"rnn,,agc2,"` 等价于 `"rnn,agc2"`）；
+    /// 空串按 `"none"` 处理，方便 CLI 直接传空参数。
+    pub fn parse(spec: &str) -> Result<Self, ChainParseError> {
+        let spec = spec.trim();
+        if spec.is_empty() || spec == "none" {
+            return Ok(Self::default());
+        }
+
+        let mut stages = Vec::new();
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            stages.push(StageKind::parse(part)?);
+        }
+        Ok(Self { stages })
+    }
+
+    /// 档位列表。
+    #[must_use]
+    pub fn stages(&self) -> &[StageKind] {
+        &self.stages
+    }
+
+    /// 链路总算法延迟（样本数）。
+    #[must_use]
+    pub fn total_latency_samples(&self) -> usize {
+        self.stages.iter().map(|k| k.latency_samples()).sum()
+    }
+
+    /// 链路总算法延迟（毫秒）。
+    #[must_use]
+    pub fn total_latency_ms(&self) -> f32 {
+        samples_to_ms(self.total_latency_samples())
+    }
+
+    /// 报告用的 JSON 数组（如 `["rnn","agc2"]`）。
+    ///
+    /// 手写而不引 `serde`：只有一层字符串数组，没必要为它拉一整套序列化框架进实时 crate。
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let items: Vec<String> = self
+            .stages
+            .iter()
+            .map(|k| format!("\"{}\"", k.name()))
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+}
+
+impl fmt::Display for ChainDesc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.stages.is_empty() {
+            return f.write_str("none");
+        }
+        let names: Vec<&str> = self.stages.iter().map(|k| k.name()).collect();
+        f.write_str(&names.join(","))
+    }
+}
+
+/// 真正跑帧的链路。
+///
+/// `Vec<Box<dyn Stage>>` 只在构造期可变，`process` 里只做遍历（v1 允许虚调用，先测出来再谈去虚化）。
+pub struct Chain {
+    stages: Vec<Box<dyn Stage>>,
+}
+
+impl Chain {
+    /// 用已经构造好的阶段拼一条链。
+    #[must_use]
+    pub fn new(stages: Vec<Box<dyn Stage>>) -> Self {
+        Self { stages }
+    }
+
+    /// 空链：只做直通，用于取「无处理」基线。
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { stages: Vec::new() }
+    }
+
+    /// 在链尾追加一个阶段（仅构造期调用）。
+    pub fn push(&mut self, stage: Box<dyn Stage>) {
+        self.stages.push(stage);
+    }
+
+    /// 链路总算法延迟（样本数），由各阶段自报，**不是**配置里抄来的常数。
+    #[must_use]
+    pub fn total_latency_samples(&self) -> usize {
+        self.stages.iter().map(|s| s.latency_samples()).sum()
+    }
+
+    /// 链路总算法延迟（毫秒）。
+    #[must_use]
+    pub fn total_latency_ms(&self) -> f32 {
+        samples_to_ms(self.total_latency_samples())
+    }
+
+    /// 原地处理一帧，返回 VAD 概率。
+    ///
+    /// 约定 `1.0` 表示「本阶段没有提供 VAD」；返回值取**最后一个给出有效值的阶段**
+    /// （通常是降噪档），全链都没有 VAD 时为 `1.0`。
+    pub fn process(&mut self, frame: &mut Frame) -> f32 {
+        let mut vad = 1.0;
+        for stage in &mut self.stages {
+            let stage_vad = stage.process(frame);
+            if stage_vad != 1.0 {
+                vad = stage_vad;
+            }
+        }
+        vad
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FRAME_SAMPLES, Frame};
+
+    #[test]
+    fn none_has_zero_latency() {
+        let desc = ChainDesc::parse("none").expect("解析 none 失败");
+        assert!(desc.stages().is_empty());
+        assert_eq!(desc.total_latency_ms(), 0.0);
+        assert_eq!(desc.to_string(), "none");
+    }
+
+    #[test]
+    fn rnn_costs_ten_milliseconds() {
+        // P1-2 验收：parse("rnn").total_latency_ms() == 10.0
+        assert_eq!(ChainDesc::parse("rnn").unwrap().total_latency_ms(), 10.0);
+    }
+
+    #[test]
+    fn full_chain_matches_design_budget() {
+        // 技术设计 §6.3 的示例：rnn + agc2 + opus = 10 + 0 + 6.5 = 16.5 ms
+        let desc = ChainDesc::parse("highpass,agc2,rnn,opus").unwrap();
+        assert_eq!(desc.total_latency_ms(), 16.5);
+        // DFN3 档：30 + 0 + 6.5 = 36.5 ms
+        let quality = ChainDesc::parse("dfn3,agc2,opus").unwrap();
+        assert_eq!(quality.total_latency_ms(), 36.5);
+    }
+
+    #[test]
+    fn parser_tolerates_whitespace_and_empty_segments() {
+        let desc = ChainDesc::parse("  rnn , , agc2 ,").unwrap();
+        assert_eq!(desc.stages(), &[StageKind::Rnn, StageKind::Agc2]);
+        assert_eq!(desc.to_string(), "rnn,agc2");
+        assert_eq!(ChainDesc::parse("").unwrap(), ChainDesc::default());
+    }
+
+    #[test]
+    fn unknown_stage_is_rejected_with_hint() {
+        let err = ChainDesc::parse("rnn,sew-noise").unwrap_err();
+        assert_eq!(
+            err,
+            ChainParseError::UnknownStage {
+                name: "sew-noise".to_owned()
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("rnn"), "报错应列出可选值：{msg}");
+    }
+
+    #[test]
+    fn json_is_a_plain_string_array() {
+        assert_eq!(ChainDesc::parse("none").unwrap().to_json(), "[]");
+        assert_eq!(
+            ChainDesc::parse("rnn,agc2").unwrap().to_json(),
+            "[\"rnn\",\"agc2\"]"
+        );
+    }
+
+    /// 测试用阶段：只加一个固定延迟并记录是否被调用，用来验证链的顺序与延迟求和。
+    struct FakeStage {
+        name: &'static str,
+        latency: usize,
+        vad: f32,
+        calls: usize,
+    }
+
+    impl Stage for FakeStage {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn latency_samples(&self) -> usize {
+            self.latency
+        }
+
+        fn process(&mut self, frame: &mut Frame) -> f32 {
+            self.calls += 1;
+            frame[0] += 1.0;
+            self.vad
+        }
+    }
+
+    #[test]
+    fn chain_sums_latency_and_propagates_vad() {
+        let mut chain = Chain::new(vec![
+            Box::new(FakeStage {
+                name: "rnn",
+                latency: 480,
+                vad: 1.0,
+                calls: 0,
+            }),
+            Box::new(FakeStage {
+                name: "vad-source",
+                latency: 0,
+                vad: 0.25,
+                calls: 0,
+            }),
+        ]);
+
+        let mut frame: Frame = [0.0; FRAME_SAMPLES];
+        assert_eq!(chain.process(&mut frame), 0.25);
+        assert_eq!(frame[0], 2.0); // 两个阶段都跑过，顺序正确
+        assert_eq!(chain.total_latency_ms(), 10.0);
+
+        let mut empty = Chain::empty();
+        let mut untouched: Frame = [0.0; FRAME_SAMPLES];
+        assert_eq!(empty.process(&mut untouched), 1.0);
+        assert_eq!(untouched[0], 0.0);
+    }
+}

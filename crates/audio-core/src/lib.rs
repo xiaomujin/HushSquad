@@ -22,6 +22,10 @@
 
 #![deny(unsafe_code)] // 确需 SIMD 等优化时，在具体项上 #[allow(unsafe_code)] 并写明理由
 
+pub mod chain;
+
+pub use chain::{Chain, ChainDesc, ChainParseError, StageKind};
+
 /// 内部统一采样率：48 kHz（技术设计 §6.1）。
 ///
 /// 设备不是 48 kHz 时由 I/O 边界用 `rubato` 重采样，**不**在处理链中段做。
