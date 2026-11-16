@@ -10,7 +10,9 @@
 # 测试素材：真实录音不入库（体积大、含个人语音）
 /testdata/raw
 *.wav
-!testdata/synthetic/*.wav
+# 合成素材也不入库：`cargo run -p testkit -- gen` 用固定种子重新生成即可（6 条 × 3.7 MB），
+# 拿 23 MB 换一个确定性命令不划算。CI 里跑一次 gen 就够。
+/testdata/synthetic/
 
 # 前端（P6 起）
 node_modules

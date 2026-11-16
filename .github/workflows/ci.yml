@@ -32,6 +32,12 @@ jobs:
       - name: 测试
         run: cargo test --workspace
 
+      - name: 离线回放冒烟（合成素材 → 链路 → 热路径零分配门禁）
+        run: |
+          cargo run -p testkit -- gen --out testdata/synthetic --seconds 3
+          cargo run -p testkit -- run --in testdata/synthetic/clean_48k_mono.wav \
+            --out out/proc.wav --chain opus --codec opus:10ms:32k --report out/report.json
+
       - name: 许可证 / advisory / 来源 / 禁用 crate
         run: cargo deny check
 

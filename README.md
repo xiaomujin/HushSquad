@@ -8,7 +8,7 @@
 ## 当前状态
 
 **P0 完成**：工作区骨架、依赖纪律、门禁脚本已落地（门禁全绿）。
-**P1 进行中**：`audio-core` 的接缝（`Stage` / `Frame` / 延迟换算）已定义，Opus 封装与 `testkit` 离线回放待做。
+**P1 完成**：离线直通链路 + 测量工具已落地——`testkit run` 能出 encode/decode 的 p50/p95/max，热路径分配数由机器验证为 0。下一步 P2（桌面实时 I/O）。
 
 | 阶段 | 状态 |
 |---|---|
@@ -17,7 +17,7 @@
 | 协议草案 | v0.1 完成 |
 | 执行方案 | v0.1.1 完成 |
 | P0 地基（代码） | **完成**（7 个 crate 骨架 + deny.toml + 门禁脚本，全绿） |
-| P1 骨架 L0（代码） | 进行中（P1-1 接缝 / P1-2 链路描述 / P1-3 Opus 封装 已完成；下一步 P1-4 testkit） |
+| P1 骨架 L0（代码） | **完成**（接缝 / 链路描述 / Opus 封装 / testkit 离线回放 / 素材生成 / 延迟模型，tag `p1-gate`） |
 
 ## 文档
 
@@ -79,6 +79,22 @@ powershell -ExecutionPolicy Bypass -File scripts\check.ps1
 门禁内容：`cargo fmt --check` → `cargo clippy -D warnings` → `cargo test` → `cargo deny check`（许可证 / advisory / 来源 / 禁用 crate）→ **audio-core 不得含 tokio / axum / tower** 的依赖纯净断言。
 
 `Cargo.lock` 入库（项目含二进制目标，构建需可复现）。工具链锁定在 `rust-toolchain.toml`。
+
+### 离线测量（P1 起）
+
+```powershell
+# 1. 生成合成素材（固定种子，不入库）
+cargo run -p testkit --release -- gen --out testdata/synthetic
+
+# 2. 跑一遍链路，出报告（耗时数字只在 --release 下有意义）
+cargo run -p testkit --release -- run --in testdata/synthetic/clean_48k_mono.wav \
+    --out out/proc.wav --chain opus --codec opus:10ms:32k --report out/report.json
+
+# 3. 把技术设计附录 A 的延迟预算用代码复算一遍
+cargo run -p testkit --release -- latency-model --chain dfn3,agc2,opus
+```
+
+`run` 报告里的 `allocations_in_hot_path` 必须为 0，否则命令直接失败——这是「热路径不许分配」的机器门禁。
 ## 明确不做
 
 浏览器 Web 端、视频、MCU 服务端混音（v1）、P2P/NAT 打洞（v1）、完整 WebRTC ICE/SDP、Mumble 客户端互通。
