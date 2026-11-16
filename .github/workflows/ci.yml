@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: 门禁（fmt / clippy / test / deny / 依赖纯净）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 工具链由 rust-toolchain.toml 决定，这里只保证组件齐全
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy（-D warnings）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace
+
+      - name: 许可证 / advisory / 来源 / 禁用 crate
+        run: cargo deny check
+
+      - name: audio-core 依赖纯净断言
+        run: |
+          if cargo tree -p audio-core --edges normal | grep -Eq "tokio|axum|tower|hyper"; then
+            echo "FAIL: audio-core 引入了网络运行时依赖，实时链路必须保持纯净" >&2
+            exit 1
+          fi
+          echo "OK: audio-core 无网络运行时依赖"
