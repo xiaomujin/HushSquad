@@ -1,0 +1,17 @@
+[package]
+name = "loopback"
+description = "桌面环回工具（P2-2）：采集→rtrb→播放，含 --impulse 物理环回延迟测量。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+audio-core = { path = "../../crates/audio-core", version = "0.0.0" }
+audio-io = { path = "../../crates/audio-io", version = "0.0.0" }
+rtrb.workspace = true
+serde.workspace = true
+serde_json.workspace = true

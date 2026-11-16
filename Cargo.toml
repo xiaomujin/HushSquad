@@ -4,7 +4,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/*"]        # apps/* 在 P6 加入
+members = ["crates/*", "apps/*"]   # apps/loopback 是 P2 的临时二进制，P6 前一直在用
 
 [workspace.package]
 version = "0.0.0"             # 未发布，0.0.0 表示骨架阶段

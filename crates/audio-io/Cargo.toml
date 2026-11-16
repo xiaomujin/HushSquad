@@ -1,6 +1,6 @@
 [package]
 name = "audio-io"
-description = "平台音频 I/O：cpal 封装、设备枚举与热插拔、Android 权限与路由。"
+description = "cpal 封装：设备枚举、采集/播放、热插拔与错误恢复。"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+cpal.workspace = true
+rtrb.workspace = true

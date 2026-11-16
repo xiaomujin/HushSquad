@@ -95,6 +95,23 @@ cargo run -p testkit --release -- latency-model --chain dfn3,agc2,opus
 ```
 
 `run` 报告里的 `allocations_in_hot_path` 必须为 0，否则命令直接失败——这是「热路径不许分配」的机器门禁。
+
+### 桌面环回（P2）
+
+```powershell
+# 看设备
+cargo run -p loopback -- --list-devices
+
+# 直通：采集 → rtrb → 播放（会出声，注意回授）
+cargo run -p loopback --release -- --seconds 10 --ring-ms 10 --report out/loopback.json
+
+# 环回延迟（D1）：播放脉冲串 + 麦克风录回，互相关求延迟
+cargo run -p loopback --release -- --impulse --period-ms 500 --seconds 10 \
+    --input "USB Condenser Microphone" --output "TOPPING USB DAC" --report out/impulse.json
+```
+
+`--impulse` 的数字带 `uncertainty_ms`（默认 ±20 ms，来自环形缓冲 + 一个回调缓冲），只能当量级参考；
+要压到 ±2 ms 以内需要用 cpal 回调时间戳跨流比较（P2-3 的后续）。
 ## 明确不做
 
 浏览器 Web 端、视频、MCU 服务端混音（v1）、P2P/NAT 打洞（v1）、完整 WebRTC ICE/SDP、Mumble 客户端互通。
