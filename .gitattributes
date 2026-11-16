@@ -7,3 +7,7 @@
 
 *.png  binary
 *.wav  binary
+
+# .bat 必须是 CRLF：cmd.exe 对 LF-only 批处理的解析不可靠（尤其 if/for 块）。
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
