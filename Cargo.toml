@@ -1,0 +1,49 @@
+# HushSquad workspace
+# 依赖方向（硬约束）：ui → app → client-core → {audio-core, protocol, transport}
+# audio-core 不得依赖 transport / protocol；server-core 不依赖 audio-core（v1 无 MCU）。
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]        # apps/* 在 P6 加入
+
+[workspace.package]
+version = "0.0.0"             # 未发布，0.0.0 表示骨架阶段
+edition = "2024"
+rust-version = "1.96"         # MSRV 下限：由 deep-filter-rt 抬高；见 docs/crates-选型验证报告-v0.1.md §3
+publish = false               # 许可证待定，暂不对外发布（见 docs/执行方案与步骤-v0.1.md §12.1）
+
+[workspace.dependencies]
+# 版本依据 docs/crates-选型验证报告-v0.1.md 的实证结论。⚠️ 标记项不得承重。
+# 注意：workspace 层不能写 optional，可选性由各成员 crate 声明 { workspace = true, optional = true }。
+cpal = "0.18"
+rtrb = "0.4"
+rubato = "5"
+nnnoiseless = "0.5"                        # 低延迟档 + VAD
+sonora-agc2 = "0.3"
+opus = "0.4"
+neteq = { version = "0.9", default-features = false }   # 必须关默认 feature，否则拉进 axum/tokio
+chacha20poly1305 = "0.11"
+rustls = "0.23"                            # 勿用 0.24-dev
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
+deep-filter-rt = "0.2"                     # ⚠️ 仅桌面/高端安卓，feature = denoise-dfn3
+
+# 实时链路需要接近 release 的性能，但要保留符号以便性能分析
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+# 全局 lint 底线
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.cargo]
+# 依赖清单是选型结论的记录（docs/crates-选型验证报告-v0.1.md），P1 起逐个被真正使用；
+# 在此之前不因「尚未使用」而报警，避免每次构建 11 条噪音掩盖真正的警告。
+unused_workspace_dependencies = "allow"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"        # 实时线程禁止打印；CLI（testkit）自行 allow

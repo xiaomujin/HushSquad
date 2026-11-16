@@ -1,0 +1,12 @@
+[package]
+name = "server-core"
+description = "服务器核心：频道树、ACL、SFU 语音转发。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

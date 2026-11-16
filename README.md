@@ -7,7 +7,7 @@
 
 ## 当前状态
 
-**设计阶段**。仓库内目前只有文档，尚无代码。
+**P0 完成**：工作区骨架、依赖纪律、门禁脚本已落地（门禁全绿）。音频链路从 P1 开始。
 
 | 阶段 | 状态 |
 |---|---|
@@ -15,7 +15,7 @@
 | 依赖选型核实 | v0.1 完成（源码级核实） |
 | 协议草案 | v0.1 完成 |
 | 执行方案 | v0.1.1 完成 |
-| P0 地基（代码） | **未开始** |
+| P0 地基（代码） | **完成**（7 个 crate 骨架 + deny.toml + 门禁脚本，全绿） |
 
 ## 文档
 
@@ -31,6 +31,49 @@
 
 设计文档 → 选型报告 → 协议草案 → 执行方案。四份文档里的关键常数已对齐（10 ms 处理帧、20 B 语音包头、30 ms DFN3 延迟）。
 
+## 目录结构
+
+```text
+crates/
+  audio-core/    纯 DSP：降噪/AGC/Opus/抖动缓冲/混音。不依赖 I/O 与网络
+  audio-io/      cpal 封装：设备枚举、热插拔、Android 权限与路由
+  protocol/      控制面消息 + 语音包线格式（20 B 头）
+  transport/     加密 UDP：ChaCha20-Poly1305、keepalive、会话重绑定
+  client-core/   客户端状态机：频道、成员、PTT、选择性收听
+  server-core/   频道树、ACL、SFU 语音转发
+  testkit/       离线回放 / 网络模拟 / 延迟测量（CLI）
+docs/            设计、选型、协议、执行方案、ADR、measurements.md
+proto 定义见 docs/proto/hushsquad-control-v1.proto
+```
+
+依赖方向是硬约束：`audio-core` 不认识 `transport`/`protocol`（门禁里有一条断言在守着）。
+
+## 构建与检查
+
+### Windows（需要 MSVC 工具链）
+
+两种方式任选：
+
+1. 在 **Developer PowerShell for VS 2022** 里直接 `cargo build`；
+2. 普通 shell 用包装脚本（内部用 vswhere 定位 VS，自动 call vcvars64）：
+
+```bat
+scripts\with-msvc.bat cargo build --workspace
+```
+
+### 一键门禁（5 项，任一失败即非 0）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\check.ps1
+```
+
+```bash
+./scripts/check.sh
+```
+
+门禁内容：`cargo fmt --check` → `cargo clippy -D warnings` → `cargo test` → `cargo deny check`（许可证 / advisory / 来源 / 禁用 crate）→ **audio-core 不得含 tokio / axum / tower** 的依赖纯净断言。
+
+`Cargo.lock` 入库（项目含二进制目标，构建需可复现）。工具链锁定在 `rust-toolchain.toml`。
 ## 明确不做
 
 浏览器 Web 端、视频、MCU 服务端混音（v1）、P2P/NAT 打洞（v1）、完整 WebRTC ICE/SDP、Mumble 客户端互通。

@@ -1,0 +1,12 @@
+[package]
+name = "client-core"
+description = "客户端状态机：频道、成员、PTT、选择性收听。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "audio-core"
+description = "音频处理链路：降噪/AGC/Opus/抖动缓冲/混音。纯 DSP，无 I/O、无网络。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "transport"
+description = "UDP 传输：ChaCha20-Poly1305、keepalive、会话重绑定、限速。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

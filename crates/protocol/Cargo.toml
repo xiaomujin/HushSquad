@@ -1,0 +1,12 @@
+[package]
+name = "protocol"
+description = "控制面消息与语音包线格式、版本协商、序列化。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

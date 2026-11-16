@@ -1,0 +1,5 @@
+# 工具链锁定。2026-11-16 本机实测：stable = rustc 1.100.0 (0ef1bc386 2026-11-09)
+# 如需完全钉死到具体版本号，把 channel 改成 "1.100.0"（rustup 会额外下载一份该工具链）。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,44 @@
+# cargo-deny 配置。CI 必跑；本仓库的许可证纪律在这里落地。
+# 依据：docs/crates-选型验证报告-v0.1.md §2.9 与 docs/执行方案与步骤-v0.1.md §12.1
+
+[advisories]
+version = 2
+yanked = "deny"        # 被撤回的版本一律不许用
+ignore = []
+
+[licenses]
+version = 2
+# 只允许宽松许可证。AGPL / GPL / SSPL 等强传染许可证不在列表内 → 默认拒绝。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+# 自有 crate 尚未指定许可证（许可证待定，见 docs/执行方案与步骤-v0.1.md §12.1）。
+# 它们全部 publish = false，因此按「私有 crate」跳过许可证检查；
+# 注意：这只跳过检查，不改变「不得引入 AGPL / 来源不明代码」这条约束。
+private = { ignore = true }
+
+# 依赖还很少，allow 列表必然有未命中的项；升级依赖后自然会命中，不因此告警。
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"     # 依赖必须写明确版本，不许用 *
+deny = [
+    { name = "mumcord-codec", reason = "AGPL-3.0-only，禁止链接；只能阅读参考" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

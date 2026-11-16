@@ -1,0 +1,12 @@
+[package]
+name = "audio-io"
+description = "平台音频 I/O：cpal 封装、设备枚举与热插拔、Android 权限与路由。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
