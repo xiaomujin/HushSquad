@@ -44,6 +44,7 @@ struct SessionReport {
     capture_dropped_samples: u64,
     playout_underrun_samples: u64,
     stream_errors: u64,
+    xrun_events: u64,
     restarts: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     delay_ms: Option<f64>,
@@ -98,7 +99,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         input: None,
         output: None,
         seconds: 10.0,
-        ring_ms: 10.0,
+        ring_ms: 50.0,
         impulse: false,
         period_ms: 500.0,
         codec: Codec::None,
@@ -222,6 +223,7 @@ fn run_passthrough(args: &Args) -> Result<SessionReport, String> {
     let mut attempt = 0_u32;
     loop {
         let report = session_passthrough(args)?;
+        // 只有「设备真的没了」才重建；xrun 只是抖了一下，重建反而丢更多音频。
         if report.stream_errors == 0 || attempt >= 2 {
             return Ok(SessionReport {
                 restarts: attempt,
@@ -290,8 +292,10 @@ fn session_passthrough(args: &Args) -> Result<SessionReport, String> {
         seconds: args.seconds,
         capture_dropped_samples: capture.stats.dropped_samples.load(Ordering::Relaxed),
         playout_underrun_samples: playout.stats.underrun_samples.load(Ordering::Relaxed),
-        stream_errors: capture.stats.callback_errors.load(Ordering::Relaxed)
-            + playout.stats.callback_errors.load(Ordering::Relaxed),
+        stream_errors: capture.stats.fatal_errors.load(Ordering::Relaxed)
+            + playout.stats.fatal_errors.load(Ordering::Relaxed),
+        xrun_events: capture.stats.xrun_events.load(Ordering::Relaxed)
+            + playout.stats.xrun_events.load(Ordering::Relaxed),
         restarts: 0,
         delay_ms: None,
         delay_lag_samples: None,
@@ -316,8 +320,8 @@ fn wait(seconds: f64, events: &mpsc::Receiver<StreamEvent>) {
     let deadline = Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
     while Instant::now() < deadline {
         match events.recv_timeout(Duration::from_millis(100)) {
-            Ok(StreamEvent::Error(message)) => eprintln!("流事件：{message}"),
-            Ok(StreamEvent::Disconnected) => eprintln!("设备断开"),
+            Ok(StreamEvent::Fatal { kind, message }) => eprintln!("[致命] {kind}: {message}"),
+            Ok(StreamEvent::Warning { kind, message }) => eprintln!("[xrun] {kind}: {message}"),
             Err(_) => {}
         }
     }
@@ -405,19 +409,23 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     let train = audio_io::impulse::click_train(total, period, sample_rate, 0.7);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let (emitted_len, recorded) = pump_impulse(
+    let (emitted_len, recorded, max_occupancy) = pump_impulse(
         capture_consumer,
         playout_producer,
         &train,
         sample_rate,
         Arc::clone(&stop),
         args.seconds,
+        ring_samples,
     );
     stop.store(true, Ordering::Relaxed);
 
     // 把流事件打印出来（设备被拔、格式失效都会走这里），别让它们静默消失。
     while let Ok(event) = rx.try_recv() {
-        eprintln!("流事件：{event:?}");
+        match event {
+            StreamEvent::Fatal { kind, message } => eprintln!("[致命] {kind}: {message}"),
+            StreamEvent::Warning { kind, message } => eprintln!("[xrun] {kind}: {message}"),
+        }
     }
 
     let estimate = audio_io::impulse::estimate_delay(
@@ -427,8 +435,9 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         sample_rate,
     );
 
-    // 不确定度：播放环形缓冲占用 + 一个回调缓冲（采集侧和播放侧各算一次，取保守值）。
-    let uncertainty_samples = ring_samples + FRAME_SAMPLES;
+    // 不确定度：实测的播放环最大占用 + 一个回调缓冲（取保守值）。
+    // 用「实测占用」而不是「环容量」：容量只是上限，实际占用才真的进延迟。
+    let uncertainty_samples = max_occupancy + FRAME_SAMPLES;
     let report = SessionReport {
         mode: "impulse".to_owned(),
         input: args.input.clone(),
@@ -439,8 +448,10 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         seconds: args.seconds,
         capture_dropped_samples: capture.stats.dropped_samples.load(Ordering::Relaxed),
         playout_underrun_samples: playout.stats.underrun_samples.load(Ordering::Relaxed),
-        stream_errors: capture.stats.callback_errors.load(Ordering::Relaxed)
-            + playout.stats.callback_errors.load(Ordering::Relaxed),
+        stream_errors: capture.stats.fatal_errors.load(Ordering::Relaxed)
+            + playout.stats.fatal_errors.load(Ordering::Relaxed),
+        xrun_events: capture.stats.xrun_events.load(Ordering::Relaxed)
+            + playout.stats.xrun_events.load(Ordering::Relaxed),
         restarts: 0,
         delay_ms: estimate.map(|e| e.delay_ms),
         delay_lag_samples: estimate.map(|e| e.lag_samples),
@@ -482,9 +493,12 @@ fn pump_impulse(
     sample_rate: u32,
     stop: Arc<AtomicBool>,
     seconds: f64,
-) -> (usize, Vec<f32>) {
+    playout_capacity: usize,
+) -> (usize, Vec<f32>, usize) {
     let mut recorded: Vec<f32> = Vec::with_capacity((seconds * f64::from(sample_rate)) as usize);
     let mut emitted = 0_usize;
+    let mut max_occupancy = 0_usize;
+    let capacity = playout_capacity;
     let rate = f64::from(sample_rate);
     let start = Instant::now();
 
@@ -503,6 +517,8 @@ fn pump_impulse(
         while let Ok(sample) = from_capture.pop() {
             recorded.push(sample);
         }
+        // 播放环里还压着多少样本 —— 这部分会直接算进环回延迟，必须如实报告。
+        max_occupancy = max_occupancy.max(capacity.saturating_sub(to_playout.slots()));
         std::thread::sleep(Duration::from_millis(1));
     }
 
@@ -510,5 +526,5 @@ fn pump_impulse(
     while let Ok(sample) = from_capture.pop() {
         recorded.push(sample);
     }
-    (emitted, recorded)
+    (emitted, recorded, max_occupancy)
 }

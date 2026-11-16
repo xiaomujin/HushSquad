@@ -86,13 +86,45 @@ impl std::fmt::Display for AudioIoError {
 
 impl std::error::Error for AudioIoError {}
 
-/// 流事件（设备错误、被拔出等）。上层据此重启流。
+/// 流事件。
+///
+/// 关键区分：`Xrun`（缓冲欠载/溢出）是**良性**的——它只是这一次回调抖了，流还在；
+/// 只有设备真的没了（`DeviceNotAvailable` 等）才需要重建。把两者混为一谈会导致
+/// 「每抖一次就重建流」，实测会疯狂重启并丢掉全部音频。
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// cpal 报错（设备被拔、驱动重置、格式失效……）。
-    Error(String),
-    /// 该端流已停止，需要重建。
-    Disconnected,
+    /// 必须重建流（设备被拔、host 消失、格式失效、无权限）。
+    Fatal {
+        /// 错误类别（cpal 的 `ErrorKind`）。
+        kind: String,
+        /// 完整描述。
+        message: String,
+    },
+    /// 良性事件：xrun、路由变化、实时调度被拒。只计数，不重建。
+    Warning {
+        /// 错误类别。
+        kind: String,
+        /// 完整描述。
+        message: String,
+    },
+}
+
+/// 把 cpal 的错误分类成「要不要重建流」。
+fn classify(error: &cpal::Error) -> StreamEvent {
+    use cpal::ErrorKind;
+    let kind = error.kind();
+    let message = format!("{kind}: {error}");
+    let kind = kind.to_string();
+    match error.kind() {
+        ErrorKind::Xrun
+        | ErrorKind::DeviceChanged
+        | ErrorKind::DeviceBusy
+        | ErrorKind::RealtimeDenied
+        | ErrorKind::ResourceExhausted => StreamEvent::Warning { kind, message },
+        // DeviceNotAvailable / HostUnavailable / StreamInvalidated / UnsupportedConfig /
+        // PermissionDenied / BackendError / Other：都按「流不能再用」处理。
+        _ => StreamEvent::Fatal { kind, message },
+    }
 }
 
 /// 采集侧计数。
@@ -100,8 +132,10 @@ pub enum StreamEvent {
 pub struct CaptureStats {
     /// 环形缓冲满而丢弃的样本数（丢的是**新**样本，见模块注释）。
     pub dropped_samples: AtomicU64,
-    /// 回调里收到的错误次数。
-    pub callback_errors: AtomicU64,
+    /// 需要重建流的错误次数。
+    pub fatal_errors: AtomicU64,
+    /// 良性事件（xrun 等）次数。
+    pub xrun_events: AtomicU64,
 }
 
 /// 播放侧计数。
@@ -109,8 +143,10 @@ pub struct CaptureStats {
 pub struct PlayoutStats {
     /// 环形缓冲空而补的静音样本数（欠载）。
     pub underrun_samples: AtomicU64,
-    /// 回调里收到的错误次数。
-    pub callback_errors: AtomicU64,
+    /// 需要重建流的错误次数。
+    pub fatal_errors: AtomicU64,
+    /// 良性事件（xrun 等）次数。
+    pub xrun_events: AtomicU64,
 }
 
 /// 采集句柄。**必须持有**：drop 即停流。
@@ -376,8 +412,16 @@ where
                 }
             },
             move |err| {
-                error_stats.callback_errors.fetch_add(1, Ordering::Relaxed);
-                let _ = events.send(StreamEvent::Error(err.to_string()));
+                let event = classify(&err);
+                match &event {
+                    StreamEvent::Fatal { .. } => {
+                        error_stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    StreamEvent::Warning { .. } => {
+                        error_stats.xrun_events.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                let _ = events.send(event);
             },
             None,
         )
@@ -475,8 +519,16 @@ where
                 }
             },
             move |err| {
-                error_stats.callback_errors.fetch_add(1, Ordering::Relaxed);
-                let _ = events.send(StreamEvent::Error(err.to_string()));
+                let event = classify(&err);
+                match &event {
+                    StreamEvent::Fatal { .. } => {
+                        error_stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    StreamEvent::Warning { .. } => {
+                        error_stats.xrun_events.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                let _ = events.send(event);
             },
             None,
         )
