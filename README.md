@@ -110,7 +110,9 @@ cargo run -p loopback --release -- --impulse --period-ms 500 --seconds 10 \
     --input "USB Condenser Microphone" --output "TOPPING USB DAC" --report out/impulse.json
 ```
 
-`--impulse` 的数字带 `uncertainty_ms`（默认 ±20 ms，来自环形缓冲 + 一个回调缓冲），只能当量级参考；
+`--buffer <帧>` 是设备缓冲的请求值（如 128/256/480），调小降延迟、更容易 xrun；不给就用设备默认。
+
+`--impulse` 的数字带 `uncertainty_ms`（来自播放环实测占用 + 一个回调缓冲，默认几十毫秒），只能当量级参考；
 要压到 ±2 ms 以内需要用 cpal 回调时间戳跨流比较（P2-3 的后续）。
 ## 明确不做
 

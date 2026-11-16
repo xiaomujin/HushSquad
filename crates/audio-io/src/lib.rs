@@ -44,6 +44,8 @@ pub struct StreamFormat {
     pub sample_rate: u32,
     /// 设备声道数（内部会下混成单声道）。
     pub channels: u16,
+    /// 请求的设备缓冲（帧）；`None` 表示用设备默认。
+    pub requested_buffer_frames: Option<u32>,
 }
 
 /// 音频 I/O 错误。
@@ -313,6 +315,12 @@ fn choose_config(
     Ok((chosen.config(), chosen.sample_format()))
 }
 
+fn apply_buffer(config: &mut cpal::StreamConfig, frames: Option<u32>) {
+    if let Some(frames) = frames {
+        config.buffer_size = cpal::BufferSize::Fixed(frames);
+    }
+}
+
 fn capture_stats_pair() -> (Arc<CaptureStats>, Arc<CaptureStats>) {
     let stats = Arc::new(CaptureStats::default());
     (Arc::clone(&stats), stats)
@@ -324,17 +332,24 @@ fn playout_stats_pair() -> (Arc<PlayoutStats>, Arc<PlayoutStats>) {
 }
 
 /// 开始采集：把设备音频下混成单声道 f32 推进 `producer`。
+///
+/// `buffer_frames` 为 `None` 时用设备默认缓冲；给定时用固定缓冲（P2-3 的「buffer 调小一档」）。
+/// 固定值不被设备接受时**自动回退**到默认，并把实际使用的缓冲记在日志里——
+/// 否则「我明明调小了」和「设备没理我」会变成一笔糊涂账。
 pub fn start_capture(
     device_name: Option<&str>,
     producer: rtrb::Producer<f32>,
     events: Sender<StreamEvent>,
+    buffer_frames: Option<u32>,
 ) -> Result<CaptureHandle, AudioIoError> {
     let host = cpal::default_host();
     let device = find_device(&host, device_name, true)?;
-    let (config, sample_format) = choose_config(&device, true)?;
+    let (mut config, sample_format) = choose_config(&device, true)?;
+    apply_buffer(&mut config, buffer_frames);
     let format = StreamFormat {
         sample_rate: config.sample_rate,
         channels: config.channels,
+        requested_buffer_frames: buffer_frames,
     };
     let (shared, local) = capture_stats_pair();
 
@@ -433,13 +448,16 @@ pub fn start_playout(
     device_name: Option<&str>,
     consumer: rtrb::Consumer<f32>,
     events: Sender<StreamEvent>,
+    buffer_frames: Option<u32>,
 ) -> Result<PlayoutHandle, AudioIoError> {
     let host = cpal::default_host();
     let device = find_device(&host, device_name, false)?;
-    let (config, sample_format) = choose_config(&device, false)?;
+    let (mut config, sample_format) = choose_config(&device, false)?;
+    apply_buffer(&mut config, buffer_frames);
     let format = StreamFormat {
         sample_rate: config.sample_rate,
         channels: config.channels,
+        requested_buffer_frames: buffer_frames,
     };
     let (shared, local) = playout_stats_pair();
 

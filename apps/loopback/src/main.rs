@@ -28,7 +28,8 @@ const USAGE: &str = "\
   loopback --impulse [--period-ms 500] [--seconds 10] [--report out/impulse.json]\n\
 \n\
 说明：\n\
-  --ring-ms   播放/采集环形缓冲长度，直接进环回延迟，默认 10 ms\n\
+  --ring-ms   播放/采集环形缓冲长度，直接进环回延迟，默认 50 ms\n\
+  --buffer    设备缓冲（帧，如 128/256/480）；不给就用设备默认。调小可降延迟，代价是更容易 xrun\n\
   --impulse   播放已知脉冲串并用麦克风录回，互相关求环回延迟（外放时才有声学路径）\n";
 
 /// 一次会话的统计。
@@ -64,6 +65,8 @@ struct SessionReport {
 struct FormatReport {
     sample_rate: u32,
     channels: u16,
+    /// 请求的设备缓冲（帧）；`null` 表示用设备默认。
+    requested_buffer_frames: Option<u32>,
 }
 
 impl From<StreamFormat> for FormatReport {
@@ -71,6 +74,7 @@ impl From<StreamFormat> for FormatReport {
         Self {
             sample_rate: value.sample_rate,
             channels: value.channels,
+            requested_buffer_frames: value.requested_buffer_frames,
         }
     }
 }
@@ -87,6 +91,7 @@ struct Args {
     output: Option<String>,
     seconds: f64,
     ring_ms: f64,
+    buffer: Option<u32>,
     impulse: bool,
     period_ms: f64,
     codec: Codec,
@@ -100,6 +105,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         output: None,
         seconds: 10.0,
         ring_ms: 50.0,
+        buffer: None,
         impulse: false,
         period_ms: 500.0,
         codec: Codec::None,
@@ -125,6 +131,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 parsed.period_ms = take(args, &mut i, "--period-ms")?
                     .parse()
                     .map_err(|e| format!("--period-ms 不是数字：{e}"))?;
+            }
+            "--buffer" => {
+                let frames: u32 = take(args, &mut i, "--buffer")?
+                    .parse()
+                    .map_err(|e| format!("--buffer 不是整数：{e}"))?;
+                parsed.buffer = Some(frames);
             }
             "--impulse" => parsed.impulse = true,
             "--codec" => {
@@ -243,19 +255,23 @@ fn session_passthrough(args: &Args) -> Result<SessionReport, String> {
     let (capture, playout, stop, codec_frames) = match args.codec {
         Codec::None => {
             let (producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
-            let capture = audio_io::start_capture(args.input.as_deref(), producer, tx.clone())
-                .map_err(|e| e.to_string())?;
-            let playout = audio_io::start_playout(args.output.as_deref(), consumer, tx)
-                .map_err(|e| e.to_string())?;
+            let capture =
+                audio_io::start_capture(args.input.as_deref(), producer, tx.clone(), args.buffer)
+                    .map_err(|e| e.to_string())?;
+            let playout =
+                audio_io::start_playout(args.output.as_deref(), consumer, tx, args.buffer)
+                    .map_err(|e| e.to_string())?;
             (capture, playout, None, None)
         }
         Codec::Opus => {
             let (producer_a, consumer_a) = rtrb::RingBuffer::<f32>::new(ring_samples);
             let (producer_b, consumer_b) = rtrb::RingBuffer::<f32>::new(ring_samples);
-            let capture = audio_io::start_capture(args.input.as_deref(), producer_a, tx.clone())
-                .map_err(|e| e.to_string())?;
-            let playout = audio_io::start_playout(args.output.as_deref(), consumer_b, tx)
-                .map_err(|e| e.to_string())?;
+            let capture =
+                audio_io::start_capture(args.input.as_deref(), producer_a, tx.clone(), args.buffer)
+                    .map_err(|e| e.to_string())?;
+            let playout =
+                audio_io::start_playout(args.output.as_deref(), consumer_b, tx, args.buffer)
+                    .map_err(|e| e.to_string())?;
             if !capture.is_48k() || !playout.is_48k() {
                 return Err(format!(
                     "Opus 路径要求 48 kHz（采集 {} Hz / 播放 {} Hz）；先换 48 kHz 设备或去掉 --codec",
@@ -391,10 +407,16 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     let (capture_producer, capture_consumer) = rtrb::RingBuffer::<f32>::new(capture_ring);
     let (playout_producer, playout_consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
 
-    let capture = audio_io::start_capture(args.input.as_deref(), capture_producer, tx.clone())
-        .map_err(|e| e.to_string())?;
-    let playout = audio_io::start_playout(args.output.as_deref(), playout_consumer, tx)
-        .map_err(|e| e.to_string())?;
+    let capture = audio_io::start_capture(
+        args.input.as_deref(),
+        capture_producer,
+        tx.clone(),
+        args.buffer,
+    )
+    .map_err(|e| e.to_string())?;
+    let playout =
+        audio_io::start_playout(args.output.as_deref(), playout_consumer, tx, args.buffer)
+            .map_err(|e| e.to_string())?;
 
     let sample_rate = capture.format.sample_rate;
     if playout.format.sample_rate != sample_rate {
