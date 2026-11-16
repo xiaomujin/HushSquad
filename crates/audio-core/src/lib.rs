@@ -23,8 +23,10 @@
 #![deny(unsafe_code)] // 确需 SIMD 等优化时，在具体项上 #[allow(unsafe_code)] 并写明理由
 
 pub mod chain;
+pub mod codec;
 
 pub use chain::{Chain, ChainDesc, ChainParseError, StageKind};
+pub use codec::{AudioCodec, CodecError, MAX_PACKET_BYTES, OpusCodec, OpusConfig};
 
 /// 内部统一采样率：48 kHz（技术设计 §6.1）。
 ///

@@ -17,7 +17,7 @@
 | 协议草案 | v0.1 完成 |
 | 执行方案 | v0.1.1 完成 |
 | P0 地基（代码） | **完成**（7 个 crate 骨架 + deny.toml + 门禁脚本，全绿） |
-| P1 骨架 L0（代码） | 进行中（P1-1 接缝完成；下一步 P1-3 Opus 封装） |
+| P1 骨架 L0（代码） | 进行中（P1-1 接缝 / P1-2 链路描述 / P1-3 Opus 封装 已完成；下一步 P1-4 testkit） |
 
 ## 文档
 
@@ -62,6 +62,9 @@ proto 定义见 docs/proto/hushsquad-control-v1.proto
 ```bat
 scripts\with-msvc.bat cargo build --workspace
 ```
+
+构建前置：MSVC 工具链 + **cmake**（`opusic-sys` 用它编译 libopus）。本机 cmake 装在
+`%LOCALAPPDATA%\Programs\CMake`，`scripts\with-msvc.bat` 会自动补进 PATH；CI 的 ubuntu 镜像自带。
 
 ### 一键门禁（5 项，任一失败即非 0）
 

@@ -10,3 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Opus 编码/解码。绑定 opusic-sys，构建期需要 cmake + C 工具链
+# （Windows 上经 scripts/with-msvc.bat，它会补 MSVC 与本机 cmake）。
+# 选型依据：docs/crates-选型验证报告-v0.1.md §2.5；备选 opus-pure（纯 Rust）留作对照实验。
+opus.workspace = true
