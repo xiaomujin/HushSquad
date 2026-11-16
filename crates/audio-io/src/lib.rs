@@ -11,7 +11,7 @@
 pub mod impulse;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -46,6 +46,8 @@ pub struct StreamFormat {
     pub channels: u16,
     /// 请求的设备缓冲（帧）；`None` 表示用设备默认。
     pub requested_buffer_frames: Option<u32>,
+    /// 设备实际的采样格式（U8/I16/F32…）。排查「峰值只有 1/128」这类问题时是第一线索。
+    pub sample_format: cpal::SampleFormat,
 }
 
 /// 音频 I/O 错误。
@@ -138,6 +140,35 @@ pub struct CaptureStats {
     pub fatal_errors: AtomicU64,
     /// 良性事件（xrun 等）次数。
     pub xrun_events: AtomicU64,
+    /// 采集峰值（f32 的位模式）。麦克风静音时这里会接近 0，是排查第一线索。
+    peak_bits: AtomicU32,
+}
+
+impl CaptureStats {
+    /// 记录一个峰值（只在回调里按缓冲块调用一次，不做逐样本原子操作）。
+    fn update_peak(&self, value: f32) {
+        let mut current = self.peak_bits.load(Ordering::Relaxed);
+        loop {
+            if value.to_bits() <= current {
+                return;
+            }
+            match self.peak_bits.compare_exchange_weak(
+                current,
+                value.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// 采集峰值（线性）。
+    #[must_use]
+    pub fn peak(&self) -> f32 {
+        f32::from_bits(self.peak_bits.load(Ordering::Relaxed))
+    }
 }
 
 /// 播放侧计数。
@@ -149,6 +180,64 @@ pub struct PlayoutStats {
     pub fatal_errors: AtomicU64,
     /// 良性事件（xrun 等）次数。
     pub xrun_events: AtomicU64,
+}
+
+/// 一次回调的时间戳。
+///
+/// 跨流可比性：WASAPI 上输入/输出两路都用 `QueryPerformanceCounter`，所以两边的
+/// `stream_nanos` 在同一个时钟域里，可以直接相减。这是把环回延迟压到毫秒级的关键——
+/// 只靠「发射序列 vs 录音」的相关，会把环形缓冲占用与流启动错位一起算进去。
+///
+/// 其它平台（ALSA/CoreAudio/AAudio）也是单调时钟，但 cpal 明确说「跨流不保证共享原点」，
+/// 因此使用前应先做一次合理性检查（延迟落在 0–200 ms 内）。
+#[derive(Debug, Clone, Copy)]
+pub struct CallbackStamp {
+    /// 该缓冲第一个样本的设备时刻（输出=预计播放时刻，输入=采集时刻），纳秒。
+    pub stream_nanos: u64,
+    /// 该缓冲在所属流中的第一个样本序号。
+    pub first_index: u64,
+    /// 缓冲帧数。
+    pub frames: u64,
+    /// 本缓冲里**真正来自环形缓冲**的样本数（输出侧）；输入侧等于 `frames`。
+    ///
+    /// 输出侧存在「环里没数据 → 补静音」的情况，所以「推入的样本序号」和「流里的样本序号」
+    /// 不是同一个东西。要按推入序号找播放时刻，必须先靠这个字段建立映射。
+    pub real_frames: u64,
+    /// 回调发生时刻，基于 crate 内的统一单调纪元（纳秒）。
+    ///
+    /// 为什么还要这个：cpal 的 `StreamInstant` 在 WASAPI 上虽是 QPC，但两路流的原点
+    /// 不保证一致（实测输入/输出差出上百毫秒）。回调墙钟是同一个 `Instant` 纪元，
+    /// 用它做时基可以把两路对齐到同一根时间轴上。
+    pub wall_nanos: u64,
+}
+
+impl CallbackStamp {
+    /// 把流内的某个样本序号换算成设备时刻（纳秒）。
+    #[must_use]
+    pub fn time_of(&self, index: u64, sample_rate: u32) -> Option<u64> {
+        if index < self.first_index || index >= self.first_index + self.frames {
+            return None;
+        }
+        let offset = index - self.first_index;
+        Some(self.stream_nanos + offset * 1_000_000_000 / u64::from(sample_rate))
+    }
+}
+
+/// crate 内统一的单调纪元。
+static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// 自纪元起的纳秒数（单调，不受系统时间调整影响）。
+fn wall_nanos() -> u64 {
+    let epoch = EPOCH.get_or_init(std::time::Instant::now);
+    u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// 在一组时间戳里找出包含 `index` 的那个，并换算成设备时刻。
+#[must_use]
+pub fn sample_time(stamps: &[CallbackStamp], index: u64, sample_rate: u32) -> Option<u64> {
+    stamps
+        .iter()
+        .find_map(|stamp| stamp.time_of(index, sample_rate))
 }
 
 /// 采集句柄。**必须持有**：drop 即停流。
@@ -266,7 +355,24 @@ fn find_device(
     }
 }
 
-/// 挑一个配置：优先 48 kHz 单声道，否则退回设备默认。
+/// 采样格式的偏好排序：越小越好。
+///
+/// 第一版只挑「支持 48 kHz 的第一个配置」，结果在 TOPPING DAC + USB 电容麦上抓到了 **U8**：
+/// 播放侧 8-bit 量化、录音侧噪声底就是 1/128（−42 dBFS），脉冲根本测不出来。
+/// 格式必须按质量排，不能听设备的返回顺序。
+fn format_rank(format: cpal::SampleFormat) -> u8 {
+    match format {
+        cpal::SampleFormat::F32 => 0,
+        cpal::SampleFormat::F64 => 1,
+        cpal::SampleFormat::I32 => 2,
+        cpal::SampleFormat::I16 => 3,
+        cpal::SampleFormat::U16 => 4,
+        cpal::SampleFormat::U8 => 5,
+        _ => 6,
+    }
+}
+
+/// 挑一个配置：优先 48 kHz + 单声道 + 高质量采样格式，都不满足时退回设备默认。
 fn choose_config(
     device: &cpal::Device,
     input: bool,
@@ -285,22 +391,18 @@ fn choose_config(
             .collect()
     };
 
-    let mut best: Option<cpal::SupportedStreamConfig> = None;
-    for range in ranges {
-        if range.min_sample_rate() <= preferred_rate && preferred_rate <= range.max_sample_rate() {
-            let candidate = range.with_sample_rate(preferred_rate);
-            // 优先单声道：语音链路本来就单声道，少一次下混。
-            if candidate.channels() == 1 {
-                best = Some(candidate);
-                break;
-            }
-            if best.is_none() {
-                best = Some(candidate);
-            }
-        }
-    }
+    let mut candidates: Vec<cpal::SupportedStreamConfig> = ranges
+        .into_iter()
+        .filter(|range| {
+            range.min_sample_rate() <= preferred_rate && preferred_rate <= range.max_sample_rate()
+        })
+        .map(|range| range.with_sample_rate(preferred_rate))
+        .collect();
 
-    let chosen = match best {
+    // 先按声道数（单声道优先，少一次下混），再按采样格式质量。
+    candidates.sort_by_key(|config| (config.channels() != 1, format_rank(config.sample_format())));
+
+    let chosen = match candidates.into_iter().next() {
         Some(config) => config,
         None => {
             let default = if input {
@@ -341,6 +443,7 @@ pub fn start_capture(
     producer: rtrb::Producer<f32>,
     events: Sender<StreamEvent>,
     buffer_frames: Option<u32>,
+    stamps: Option<rtrb::Producer<CallbackStamp>>,
 ) -> Result<CaptureHandle, AudioIoError> {
     let host = cpal::default_host();
     let device = find_device(&host, device_name, true)?;
@@ -350,34 +453,37 @@ pub fn start_capture(
         sample_rate: config.sample_rate,
         channels: config.channels,
         requested_buffer_frames: buffer_frames,
+        sample_format,
     };
     let (shared, local) = capture_stats_pair();
 
     let stream = match sample_format {
         cpal::SampleFormat::F32 => {
-            start_input::<f32, _>(&device, config, producer, local, events, |s| s)
+            start_input::<f32, _>(&device, config, producer, local, events, stamps, |s| s)
         }
         cpal::SampleFormat::I16 => {
-            start_input::<i16, _>(&device, config, producer, local, events, |s| {
+            start_input::<i16, _>(&device, config, producer, local, events, stamps, |s| {
                 f32::from(s) / 32_768.0
             })
         }
         cpal::SampleFormat::U16 => {
-            start_input::<u16, _>(&device, config, producer, local, events, |s| {
+            start_input::<u16, _>(&device, config, producer, local, events, stamps, |s| {
                 (f32::from(s) - 32_768.0) / 32_768.0
             })
         }
         cpal::SampleFormat::I32 => {
-            start_input::<i32, _>(&device, config, producer, local, events, |s| {
+            start_input::<i32, _>(&device, config, producer, local, events, stamps, |s| {
                 s as f32 / 2_147_483_648.0
             })
         }
         cpal::SampleFormat::F64 => {
-            start_input::<f64, _>(&device, config, producer, local, events, |s| s as f32)
+            start_input::<f64, _>(&device, config, producer, local, events, stamps, |s| {
+                s as f32
+            })
         }
         // 8-bit 设备（部分虚拟声卡只提供 U8）
         cpal::SampleFormat::U8 => {
-            start_input::<u8, _>(&device, config, producer, local, events, |s| {
+            start_input::<u8, _>(&device, config, producer, local, events, stamps, |s| {
                 (f32::from(s) - 128.0) / 128.0
             })
         }
@@ -403,6 +509,7 @@ fn start_input<T, F>(
     mut producer: rtrb::Producer<f32>,
     stats: Arc<CaptureStats>,
     events: Sender<StreamEvent>,
+    mut stamps: Option<rtrb::Producer<CallbackStamp>>,
     to_f32: F,
 ) -> Result<cpal::Stream, AudioIoError>
 where
@@ -411,20 +518,39 @@ where
 {
     let channels = usize::from(config.channels).max(1);
     let error_stats = Arc::clone(&stats);
+    let mut first_index: u64 = 0;
     device
         .build_input_stream::<T, _, _>(
             config,
-            move |data: &[T], _info| {
+            move |data: &[T], info: &cpal::InputCallbackInfo| {
+                let frames = (data.len() / channels) as u64;
+                if let Some(sink) = stamps.as_mut() {
+                    let stamp = CallbackStamp {
+                        stream_nanos: u64::try_from(info.timestamp().capture.as_nanos())
+                            .unwrap_or(u64::MAX),
+                        first_index,
+                        frames,
+                        real_frames: frames,
+                        wall_nanos: wall_nanos(),
+                    };
+                    // 时间戳环满了就丢：它只影响测量，不影响音频本身。
+                    let _ = sink.push(stamp);
+                }
+                first_index += frames;
                 // 只做下混 + push；满了就丢新样本并计数。
+                let mut peak = 0.0_f32;
                 for frame in data.chunks_exact(channels) {
                     let mut sum = 0.0_f32;
                     for sample in frame {
                         sum += to_f32(*sample);
                     }
-                    if producer.push(sum / channels as f32).is_err() {
+                    let mono = sum / channels as f32;
+                    peak = peak.max(mono.abs());
+                    if producer.push(mono).is_err() {
                         stats.dropped_samples.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+                stats.update_peak(peak);
             },
             move |err| {
                 let event = classify(&err);
@@ -449,6 +575,7 @@ pub fn start_playout(
     consumer: rtrb::Consumer<f32>,
     events: Sender<StreamEvent>,
     buffer_frames: Option<u32>,
+    stamps: Option<rtrb::Producer<CallbackStamp>>,
 ) -> Result<PlayoutHandle, AudioIoError> {
     let host = cpal::default_host();
     let device = find_device(&host, device_name, false)?;
@@ -458,33 +585,34 @@ pub fn start_playout(
         sample_rate: config.sample_rate,
         channels: config.channels,
         requested_buffer_frames: buffer_frames,
+        sample_format,
     };
     let (shared, local) = playout_stats_pair();
 
     let stream = match sample_format {
         cpal::SampleFormat::F32 => {
-            start_output::<f32, _>(&device, config, consumer, local, events, |s| s)
+            start_output::<f32, _>(&device, config, consumer, local, events, stamps, |s| s)
         }
         cpal::SampleFormat::I16 => {
-            start_output::<i16, _>(&device, config, consumer, local, events, |s| {
+            start_output::<i16, _>(&device, config, consumer, local, events, stamps, |s| {
                 (s.clamp(-1.0, 1.0) * 32_767.0) as i16
             })
         }
         cpal::SampleFormat::U16 => {
-            start_output::<u16, _>(&device, config, consumer, local, events, |s| {
+            start_output::<u16, _>(&device, config, consumer, local, events, stamps, |s| {
                 ((s.clamp(-1.0, 1.0) * 32_767.0) + 32_768.0) as u16
             })
         }
         cpal::SampleFormat::I32 => {
-            start_output::<i32, _>(&device, config, consumer, local, events, |s| {
+            start_output::<i32, _>(&device, config, consumer, local, events, stamps, |s| {
                 (s.clamp(-1.0, 1.0) * 2_147_483_647.0) as i32
             })
         }
         cpal::SampleFormat::F64 => {
-            start_output::<f64, _>(&device, config, consumer, local, events, f64::from)
+            start_output::<f64, _>(&device, config, consumer, local, events, stamps, f64::from)
         }
         cpal::SampleFormat::U8 => {
-            start_output::<u8, _>(&device, config, consumer, local, events, |s| {
+            start_output::<u8, _>(&device, config, consumer, local, events, stamps, |s| {
                 ((s.clamp(-1.0, 1.0) * 127.0) + 128.0) as u8
             })
         }
@@ -510,6 +638,7 @@ fn start_output<T, F>(
     mut consumer: rtrb::Consumer<f32>,
     stats: Arc<PlayoutStats>,
     events: Sender<StreamEvent>,
+    mut stamps: Option<rtrb::Producer<CallbackStamp>>,
     from_f32: F,
 ) -> Result<cpal::Stream, AudioIoError>
 where
@@ -518,13 +647,19 @@ where
 {
     let channels = usize::from(config.channels).max(1);
     let error_stats = Arc::clone(&stats);
+    let mut first_index: u64 = 0;
     device
         .build_output_stream::<T, _, _>(
             config,
-            move |data: &mut [T], _info| {
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                let frames = (data.len() / channels) as u64;
+                let mut real_frames = 0_u64;
                 for frame in data.chunks_exact_mut(channels) {
                     let sample = match consumer.pop() {
-                        Ok(value) => value,
+                        Ok(value) => {
+                            real_frames += 1;
+                            value
+                        }
                         Err(_) => {
                             stats.underrun_samples.fetch_add(1, Ordering::Relaxed);
                             0.0
@@ -535,6 +670,18 @@ where
                         *slot = converted;
                     }
                 }
+                if let Some(sink) = stamps.as_mut() {
+                    let stamp = CallbackStamp {
+                        stream_nanos: u64::try_from(info.timestamp().playback.as_nanos())
+                            .unwrap_or(u64::MAX),
+                        first_index,
+                        frames,
+                        real_frames,
+                        wall_nanos: wall_nanos(),
+                    };
+                    let _ = sink.push(stamp);
+                }
+                first_index += frames;
             },
             move |err| {
                 let event = classify(&err);

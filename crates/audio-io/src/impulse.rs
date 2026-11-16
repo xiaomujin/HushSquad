@@ -25,6 +25,10 @@ pub struct DelayEstimate {
     pub delay_ms: f64,
     /// 录音峰值（线性）。麦克风被静音时这个数会接近 0，是排查「测不出延迟」的第一线索。
     pub recorded_peak: f32,
+    /// 全局最高峰的位置（可能是反射/噪声伪峰，用于对照）。
+    pub peak_lag_samples: usize,
+    /// 全局最高峰的相关度。
+    pub peak_correlation: f32,
 }
 
 /// 生成周期脉冲串：每 `period` 个样本放一个 1 ms 的指数衰减脉冲。
@@ -50,14 +54,31 @@ pub fn click_train(samples: usize, period: usize, sample_rate: u32, amplitude: f
 
 /// 估算「发射序列第 0 个样本」到「录音里对应脉冲」的位移。
 ///
-/// # 为什么不做全量互相关
+/// # 算法
 ///
-/// 10 秒 48 kHz 素材 × 24 000 个 lag = 115 亿次乘加，跑一次几十秒，还不一定能放进实时使用。
-/// 而脉冲串是**已知**的：第一个脉冲在发射序列里的位置是固定的，
-/// 所以只要在录音里找到第一个越阈样本，两者相减就是位移，O(n)。
+/// 脉冲串是我们自己生成的，所以它在发射序列里的位置是**已知的**：
+/// `first, first+P, first+2P, …`（P = `max_lag`，传一个脉冲周期）。
+/// 于是只需要对每个候选位移 lag 打一个分：把前几个脉冲的短窗（3 ms）跟录音里 `脉冲位置 + lag` 的短窗做归一化相关，
+/// 多个脉冲取平均。
 ///
-/// `max_lag` 传一个脉冲周期：位移超过一个周期就意味着漏掉了第一个脉冲，结果有歧义，直接返回 `None`。
-/// 剩下的可信度由 `correlation` 给出——它只在首个脉冲附近的窗口里算（几毫秒），代价可以忽略。
+/// 代价：`周期 × 脉冲数 × 窗长` = 24 000 × 8 × 144 ≈ 2 800 万次乘加，毫秒级；
+/// 而全量互相关是 115 亿次，几十秒——这是「能用」和「不能用」的差别。
+///
+/// 用多个脉冲而不是「找第一个越阈样本」，是因为实测里 0.2 振幅的脉冲会被房间噪声淹没，
+/// 第一个越阈样本几乎总是噪声；多脉冲平均能把 6 dB 左右的信噪比挖出来。
+/// 相关度曲线（按 lag 索引），用于诊断「为什么没找到峰」。
+///
+/// 只在排查时调用：长度 `max_lag + 1`，每个元素是各脉冲短窗归一化相关度的平均。
+#[must_use]
+pub fn correlation_curve(
+    recorded: &[f32],
+    emitted: &[f32],
+    max_lag: usize,
+    sample_rate: u32,
+) -> Vec<f32> {
+    score_curve(recorded, emitted, max_lag, sample_rate).unwrap_or_default()
+}
+
 #[must_use]
 pub fn estimate_delay(
     recorded: &[f32],
@@ -65,43 +86,48 @@ pub fn estimate_delay(
     max_lag: usize,
     sample_rate: u32,
 ) -> Option<DelayEstimate> {
-    if sample_rate == 0 {
+    if sample_rate == 0 || max_lag == 0 {
         return None;
     }
-    let first_recorded = first_peak(recorded)?;
     let first_emitted = first_peak(emitted)?;
-    if first_recorded < first_emitted {
-        return None;
+    // 3 ms 的比对窗：覆盖 1 ms 脉冲 + 扬声器与房间的早期反射
+    let window = ((sample_rate as usize / 1_000) * 3).max(32);
+
+    // 最多用 8 个脉冲；少于 2 个就退回单脉冲（相关度会虚高，但总比没有好）。
+    let mut clicks: Vec<usize> = Vec::with_capacity(8);
+    let mut position = first_emitted;
+    while clicks.len() < 8 && position + window <= emitted.len() {
+        clicks.push(position);
+        position += max_lag;
     }
-    let lag = first_recorded - first_emitted;
-    if lag > max_lag {
-        // 超过一个周期：多半是漏了第一个脉冲，或者脉冲根本没发出去。
+    if clicks.is_empty() {
         return None;
     }
 
-    // 首个脉冲附近 43 ms 的窗口（覆盖 1 ms 脉冲 + 扬声器/房间尾巴）
-    let window = 2_048
-        .min(recorded.len() - first_recorded)
-        .min(emitted.len() - first_emitted);
-    if window == 0 {
-        return None;
+    let scores = score_curve(recorded, emitted, max_lag, sample_rate)?;
+
+    // 全局最高峰只当诊断：它经常是房间反射或噪声，实测在 0.4 左右就会出现 200 ms 的伪峰。
+    let (peak_lag, peak_score) = scores.iter().enumerate().fold(
+        (0_usize, f32::MIN),
+        |acc, (i, s)| {
+            if *s > acc.1 { (i, *s) } else { acc }
+        },
+    );
+
+    // 取**最早**出现的强峰：声音总是先到直达声，再有多径反射。
+    let threshold = (peak_score * 0.75).max(0.35);
+    let mut chosen = None;
+    for lag in 1..scores.len().saturating_sub(1) {
+        let score = scores[lag];
+        if score >= threshold && score >= scores[lag - 1] && score >= scores[lag + 1] {
+            chosen = Some((lag, score));
+            break;
+        }
     }
-    let mut dot = 0.0_f64;
-    let mut energy_emitted = 0.0_f64;
-    let mut energy_recorded = 0.0_f64;
-    for i in 0..window {
-        let a = f64::from(emitted[first_emitted + i]);
-        let b = f64::from(recorded[first_recorded + i]);
-        dot += a * b;
-        energy_emitted += a * a;
-        energy_recorded += b * b;
-    }
-    if energy_emitted <= f64::EPSILON || energy_recorded <= f64::EPSILON {
-        return None;
-    }
-    let correlation = (dot / (energy_emitted.sqrt() * energy_recorded.sqrt())) as f32;
-    // 相关度太低说明「找到的第一个峰」只是噪声：宁可不给数字，也不给假数字。
-    if correlation < 0.3 {
+    let (lag, correlation) = chosen.unwrap_or((peak_lag, peak_score));
+
+    // 相关度太低说明「找到的峰」只是噪声：宁可不给数字，也不给假数字。
+    if correlation < 0.35 {
         return None;
     }
 
@@ -110,7 +136,92 @@ pub fn estimate_delay(
         correlation,
         delay_ms: lag as f64 * 1000.0 / f64::from(sample_rate),
         recorded_peak: recorded.iter().fold(0.0_f32, |acc, s| acc.max(s.abs())),
+        peak_lag_samples: peak_lag,
+        peak_correlation: peak_score,
     })
+}
+
+/// 找出信号里所有脉冲的位置（越阈后在其后 1 ms 内取峰值）。
+///
+/// 取「峰」而不是「首个越阈样本」：越阈点取决于振幅与噪声，峰是波形特征，抖动小一个量级。
+#[must_use]
+pub fn click_positions(signal: &[f32], threshold: f32, min_spacing: usize) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let search = 48.min(signal.len()); // 1 ms
+    let mut index = 0;
+    while index < signal.len() {
+        if signal[index].abs() <= threshold {
+            index += 1;
+            continue;
+        }
+        let end = (index + search).min(signal.len());
+        let mut best = index;
+        let mut best_value = signal[index].abs();
+        for (offset, sample) in signal[index..end].iter().enumerate() {
+            if sample.abs() > best_value {
+                best_value = sample.abs();
+                best = index + offset;
+            }
+        }
+        positions.push(best);
+        index = best + min_spacing.max(1);
+    }
+    positions
+}
+
+/// 逐 lag 打分：对每个候选位移，把前几个脉冲的短窗跟录音对齐，算归一化相关度再平均。
+fn score_curve(
+    recorded: &[f32],
+    emitted: &[f32],
+    max_lag: usize,
+    sample_rate: u32,
+) -> Option<Vec<f32>> {
+    if sample_rate == 0 || max_lag == 0 {
+        return None;
+    }
+    let first_emitted = first_peak(emitted)?;
+    let window = ((sample_rate as usize / 1_000) * 3).max(32);
+
+    let mut clicks: Vec<usize> = Vec::with_capacity(8);
+    let mut position = first_emitted;
+    while clicks.len() < 8 && position + window <= emitted.len() {
+        clicks.push(position);
+        position += max_lag;
+    }
+    if clicks.is_empty() {
+        return None;
+    }
+
+    let mut scores = vec![f32::MIN; max_lag + 1];
+    for (lag, slot) in scores.iter_mut().enumerate() {
+        let mut score = 0.0_f32;
+        let mut used = 0_usize;
+        for &click in &clicks {
+            let start = click + lag;
+            if start + window > recorded.len() {
+                break;
+            }
+            let mut dot = 0.0_f64;
+            let mut energy_emitted = 0.0_f64;
+            let mut energy_recorded = 0.0_f64;
+            for i in 0..window {
+                let a = f64::from(emitted[click + i]);
+                let b = f64::from(recorded[start + i]);
+                dot += a * b;
+                energy_emitted += a * a;
+                energy_recorded += b * b;
+            }
+            if energy_emitted <= f64::EPSILON || energy_recorded <= f64::EPSILON {
+                continue;
+            }
+            score += (dot / (energy_emitted.sqrt() * energy_recorded.sqrt())) as f32;
+            used += 1;
+        }
+        if used > 0 {
+            *slot = score / used as f32;
+        }
+    }
+    Some(scores)
 }
 
 /// 第一个超过「峰值 20%」的样本位置。
