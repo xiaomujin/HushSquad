@@ -1,0 +1,222 @@
+// HushSquad 控制面协议 v1 —— 草案，未实现，仅供评审
+// 配套文档：docs/协议草案-v0.1.md
+// 编码：protobuf proto3；传输：TLS 1.3 over TCP，ALPN hushsquad/1
+// 帧格式：u32 BE 长度前缀 + ControlMessage 序列化字节；单帧上限 64 KiB
+// 规则：未知字段必须忽略；未知 oneof 分支必须忽略并记日志；破坏性改动提升主版本。
+
+syntax = "proto3";
+
+package hushsquad.v1;
+
+// 顶层信封：所有控制面消息都包在这里，方便服务端单点分发与限速。
+message ControlMessage {
+  uint32 protocol = 1;   // 主版本，当前 1；未填视为 1
+  uint64 request_id = 2; // 客户端自增，用于请求/响应配对（0 表示无需响应）
+  oneof kind {
+    ClientHello      client_hello      = 10;
+    ServerHello      server_hello      = 11;
+    Auth             auth              = 12;
+    AuthResult       auth_result       = 13;
+    ChannelSync      channel_sync      = 20;
+    ChannelAdded     channel_added     = 21;
+    ChannelRemoved   channel_removed   = 22;
+    ChannelUpdated   channel_updated   = 23;
+    JoinChannel      join_channel      = 30;
+    LeaveChannel     leave_channel     = 31;
+    UserJoined       user_joined       = 40;
+    UserLeft         user_left         = 41;
+    UserUpdated      user_updated      = 42;
+    SetSelfState     set_self_state    = 50;
+    SetListening     set_listening     = 51;
+    Whisper          whisper           = 52;
+    RekeyRequest     rekey_request     = 60;
+    RekeyResponse    rekey_response    = 61;
+    Ping             ping              = 70;
+    Pong             pong              = 71;
+    Stats            stats             = 72;
+    Error            error             = 90;
+    // 100-199 预留：文本聊天、文件传输、管理面板
+    // 200-255 预留：扩展能力，需在 caps 位图中声明
+  }
+}
+
+// ---------------------------- 握手与认证 ----------------------------
+
+message ClientHello {
+  uint32 protocol_min = 1;        // 客户端支持的最低主版本
+  uint32 protocol_max = 2;        // 最高主版本
+  string client_version = 3;      // 如 0.1.0
+  string platform = 4;            // windows | macos | linux | android
+  string device_id = 5;           // 稳定设备标识（哈希后），用于 device token 绑定
+  uint64 caps = 6;                // 能力位图，见 Caps
+}
+
+// 能力位：双方都在 hello 中置位才启用对应行为。
+enum Caps {
+  CAPS_UNSPECIFIED     = 0;
+  CAPS_RED             = 1;  // 支持语音包级冗余
+  CAPS_DTX             = 2;  // 支持静音帧与 DTX 边界
+  CAPS_LISTEN_MULTI    = 4;  // 支持多频道监听
+  CAPS_WHISPER         = 8;  // 支持定向语音
+  CAPS_STATS           = 16; // 支持服务器 1 Hz 统计
+}
+
+message ServerHello {
+  uint32 protocol = 1;            // 服务器选定版本
+  string server_version = 2;
+  uint64 session_id = 3;
+  uint32 sender_id = 4;           // 语音包标识，会话内不复用
+  string voice_host = 5;          // 语音面地址（域名或 IP）
+  uint32 voice_port = 6;
+  bytes  voice_token = 7;         // 16 B，UDP Bind 凭证
+  uint32 key_epoch = 8;           // 当前语音密钥版本
+  uint32 channel_epoch = 9;       // 加入频道后由服务器更新
+  uint64 server_time_ms = 10;     // 用于 RTT/偏移估算（只做差值）
+  uint64 caps = 11;               // 服务器支持的能力位
+  Limits limits = 12;
+}
+
+message Limits {
+  uint32 max_control_msg_bytes = 1;   // 默认 65536
+  uint32 max_control_msgs_per_sec = 2; // 默认 50
+  uint32 max_voice_pps = 3;           // 默认 150
+  uint32 max_voice_payload_bytes = 4; // 默认 400
+  uint32 max_channel_users = 5;       // 默认 64
+  uint32 max_listening_channels = 6;  // 默认 8
+  uint32 ping_interval_ms = 7;        // 默认 15000
+  uint32 ping_timeout_ms = 8;         // 默认 45000
+}
+
+message Auth {
+  oneof method {
+    PasswordAuth    password     = 1;
+    DeviceTokenAuth device_token = 2;
+  }
+  string client_nonce = 3; // 可选，用于审计日志关联
+}
+
+message PasswordAuth {
+  string username = 1;
+  string password = 2;  // 仅在 TLS 内传输；服务端 argon2id 校验
+}
+
+message DeviceTokenAuth {
+  string username     = 1;
+  bytes  device_token = 2; // 登录成功后由服务端下发并本地保存
+}
+
+message AuthResult {
+  bool   ok        = 1;
+  uint32 user_id   = 2;
+  uint64 perms     = 3;  // 权限位图，见 Perm
+  bytes  device_token = 4; // 首次密码登录成功时下发，供后续免密
+  uint32 error_code = 5; // ok=false 时有效，见 ErrorCode
+  string message   = 6;
+}
+
+// 权限位（v1 只用到很少一部分，留足扩展）。
+enum Perm {
+  PERM_UNSPECIFIED      = 0;
+  PERM_JOIN_CHANNEL     = 1;
+  PERM_MOVE_ANYONE      = 2;   // 管理员把别人拉/踢出频道
+  PERM_KICK             = 4;
+  PERM_BAN              = 8;
+  PERM_CREATE_CHANNEL   = 16;
+  PERM_MANAGE_CHANNEL   = 32;
+  PERM_ADMIN            = 64;
+}
+
+// ---------------------------- 频道与成员 ----------------------------
+
+message ChannelState {
+  uint32 channel_id = 1;
+  uint32 parent_id  = 2;   // 0 表示根
+  string name       = 3;
+  uint32 position   = 4;   // 同级排序
+  uint32 max_users  = 5;   // 0 表示用服务器默认
+  uint64 flags      = 6;   // 位：1=临时频道 2=需要密码 4=只允许监听
+  string description = 7;
+  uint32 channel_epoch = 8; // 成员快照版本，与语音包头部对应
+}
+
+message UserState {
+  uint32 user_id   = 1;
+  uint32 sender_id = 2;    // 服务器分配的语音标识
+  string name      = 3;
+  uint32 channel_id = 4;   // 0 表示不在任何频道
+  bool   self_mute  = 5;
+  bool   self_deaf  = 6;
+  bool   server_mute = 7;  // 被管理员静音
+  bool   server_deaf = 8;
+  uint32 priority_speaker = 9; // 0 普通；>0 说话时压低他人（可选能力）
+  repeated uint32 listening_channel_ids = 10;
+}
+
+message ChannelSync {
+  repeated ChannelState channels = 1;
+  repeated UserState    users    = 2;
+  uint32 self_channel_id = 3;
+}
+
+message ChannelAdded   { ChannelState channel = 1; }
+message ChannelRemoved { uint32 channel_id = 1; }
+message ChannelUpdated { ChannelState channel = 1; }
+
+message JoinChannel  { uint32 channel_id = 1; string password = 2; }
+message LeaveChannel { }
+
+message UserJoined  { UserState user = 1; }
+message UserLeft    { uint32 user_id = 1; }
+message UserUpdated { UserState user = 1; }
+
+message SetSelfState {
+  bool self_mute = 1;
+  bool self_deaf = 2;
+  // PTT 是否按下不在此消息中：为免控制面抖动，PTT 由语音包存在与否表达。
+}
+
+message SetListening {
+  repeated uint32 channel_ids = 1; // 最多 limits.max_listening_channels 个
+}
+
+message Whisper {
+  repeated uint32 target_user_ids = 1;
+  uint32 channel_id = 2;             // 可选：只对某频道定向
+  bool   stop = 3;                   // true 表示结束定向
+}
+
+// ---------------------------- 密钥与运维 ----------------------------
+
+message RekeyRequest  { uint32 key_epoch = 1; }
+message RekeyResponse { uint32 key_epoch = 1; }
+
+message Ping { uint64 ts_us = 1; }
+message Pong { uint64 ts_us = 1; }
+
+message Stats {
+  uint32 rtt_ms = 1;
+  uint32 loss_permille = 2;
+  uint32 jitter_ms = 3;
+  uint32 voice_pps = 4;
+  uint32 server_voice_out_pps = 5;
+  uint32 members_in_channel = 6;
+}
+
+message Error {
+  uint32 code = 1;    // 见 ErrorCode
+  string message = 2;
+  bool fatal = 3;     // true 表示服务器随后关闭连接
+}
+
+enum ErrorCode {
+  ERROR_UNSPECIFIED        = 0;
+  UNSUPPORTED_VERSION      = 1;
+  AUTH_FAILED              = 2;
+  PERMISSION_DENIED        = 3;
+  CHANNEL_NOT_FOUND        = 4;
+  CHANNEL_FULL             = 5;
+  RATE_LIMITED             = 6;
+  SERVER_FULL              = 7;
+  VOICE_BIND_TIMEOUT       = 8;
+  INTERNAL                 = 9;
+}

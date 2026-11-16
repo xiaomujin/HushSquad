@@ -1,0 +1,27 @@
+# Rust
+/target
+**/target
+**/*.rs.bk
+
+# 构建与测量产物
+/out
+**/*.report.json
+
+# 测试素材：真实录音不入库（体积大、含个人语音）
+/testdata/raw
+*.wav
+!testdata/synthetic/*.wav
+
+# 前端（P6 起）
+node_modules
+ui/dist
+
+# 编辑器 / 系统
+.vscode
+.idea
+*.swp
+Thumbs.db
+Desktop.ini
+
+# 本地验证临时材料
+/.verify
