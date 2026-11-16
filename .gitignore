@@ -19,6 +19,7 @@ ui/dist
 # 编辑器 / 系统
 .vscode
 .idea
+.openidea
 *.swp
 Thumbs.db
 Desktop.ini
