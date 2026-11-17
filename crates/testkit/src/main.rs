@@ -19,6 +19,7 @@ HushSquad 离线测量工具\n\
   testkit baseline      --out <json> | --check <json>   （离线回归基线：只存指标，不存 wav）\n\
   testkit loss-matrix   --out <json> [--material clean] [--frames 300] [--loss 0,0.01,0.03,0.05,0.1] [--seed 42] [--redundancy]\n\
   testkit drift-run     --out <json> [--hours 4] [--ppm 100] [--min-ms 15] [--max-ms 20]\n\
+  testkit p5-bench      --out <json> [--iters 20000] [--rounds 7] [--payload 100] [--peers 7]\n\
 \n\
 链路描述 --chain：none | 逗号分隔的 highpass,rnn,agc2,dfn3,opus（dfn3 需要 --features denoise-dfn3 才编进二进制）\n\
 编解码   --codec：none | opus[:10ms][:32k]\n\
@@ -50,6 +51,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         Some("baseline") => testkit::baseline::main(&args[1..]),
         Some("loss-matrix") => testkit::lossmatrix::main(&args[1..]),
         Some("drift-run") => testkit::drift::main(&args[1..]),
+        Some("p5-bench") => testkit::p5bench::main(&args[1..]),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             Ok(())

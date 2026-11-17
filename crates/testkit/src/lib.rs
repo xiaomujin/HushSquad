@@ -12,6 +12,7 @@ pub mod drift;
 pub mod lossmatrix;
 pub mod model;
 pub mod netsim;
+pub mod p5bench;
 pub mod report;
 pub mod run;
 pub mod synth;

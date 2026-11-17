@@ -1,0 +1,14 @@
+{
+  "profile": "release",
+  "iters": 20000,
+  "rounds": 7,
+  "payload_bytes": 100,
+  "hkdf_ns": 605.685,
+  "seal_ns": 1334.185,
+  "open_ns": 1318.675,
+  "header_parse_ns": 1.295,
+  "replay_ns": 0.86,
+  "fanout_us": 12.46978,
+  "fanout_peers": 7,
+  "fanout_copies_per_packet": 7.0
+}

@@ -16,6 +16,9 @@ denoise-dfn3 = ["audio-core/denoise-dfn3"]
 
 [dependencies]
 audio-core = { path = "../audio-core", version = "0.0.0" }
+protocol = { path = "../protocol", version = "0.0.0" }
+transport = { path = "../transport", version = "0.0.0" }
+server-core = { path = "../server-core", version = "0.0.0" }
 hound.workspace = true
 serde.workspace = true
 serde_json.workspace = true
