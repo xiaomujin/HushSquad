@@ -11,7 +11,7 @@
 pub mod impulse;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -235,6 +235,97 @@ pub fn wall_nanos() -> u64 {
     u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// 回调停滞多久算「流已经死了」（毫秒）。
+///
+/// 参考：TS3 3.6.2 的看门狗阈值是 **5 秒**（`callbackWaits2 wait exceeded 5 secs`，
+/// 渲染侧自旋上限 1000 次、采集侧 10000 次），而且它**只记日志不恢复**——官方已知限制里
+/// 那句「目标设备不出声时渲染线程会卡在 callbackWaits，之后不再响应切换」就是这么来的。
+/// 我们按 10 ms 缓冲算，500 ms 已经落后 50 个缓冲；再等下去只是让用户多听半秒静音。
+pub const CALLBACK_STALL_MS: u64 = 500;
+
+/// `last` 之后过了 `now`，是否已经算停滞。
+#[must_use]
+pub fn is_stalled(last_nanos: u64, now_nanos: u64) -> bool {
+    now_nanos.saturating_sub(last_nanos) > CALLBACK_STALL_MS * 1_000_000
+}
+
+/// 看门狗与回调之间共享的状态。
+#[derive(Debug)]
+struct WatchdogShared {
+    /// 最近一次回调的时刻（`wall_nanos`）。
+    last_nanos: AtomicU64,
+    /// 监视线程该退出了。
+    stopped: AtomicBool,
+    /// 本轮停滞是否已经报过，避免每 50 ms 刷一条。
+    reported: AtomicBool,
+}
+
+/// 回调看门狗：回调停滞超过 [`CALLBACK_STALL_MS`] 就报一条 `Fatal`。
+///
+/// 为什么必须有它：设备被拔、驱动挂了、或者端点「`Initialize`/`Start` 成功但硬件不走」时，
+/// cpal 的回调会**直接不再被调用**，不抛任何错误。上层只会看到「一直没有新数据」，
+/// 分不清是对方安静还是流已经死了——这类故障只能靠计时发现，不能靠错误码。
+pub struct Watchdog {
+    shared: Arc<WatchdogShared>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    /// 起一条监视线程；`stream` 只用于日志里区分采集/播放。
+    fn start(events: Sender<StreamEvent>, stream: &'static str) -> Self {
+        let shared = Arc::new(WatchdogShared {
+            last_nanos: AtomicU64::new(wall_nanos()),
+            stopped: AtomicBool::new(false),
+            reported: AtomicBool::new(false),
+        });
+        let watched = Arc::clone(&shared);
+        let name = format!("watchdog-{stream}");
+        let join = std::thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                // 50 ms 一轮：远小于阈值，又不会把核心烧掉。
+                while !watched.stopped.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if watched.stopped.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let last = watched.last_nanos.load(Ordering::Relaxed);
+                    let now = wall_nanos();
+                    if is_stalled(last, now) {
+                        if !watched.reported.swap(true, Ordering::Relaxed) {
+                            let idle_ms = (now - last) / 1_000_000;
+                            let _ = events.send(StreamEvent::Fatal {
+                                kind: "stalled".to_owned(),
+                                message: format!(
+                                    "{stream} 回调已停滞 {idle_ms} ms（阈值 {CALLBACK_STALL_MS} ms）：\
+                                     设备多半已被拔掉，或驱动接受流却不再消费"
+                                ),
+                            });
+                        }
+                    } else {
+                        // 恢复了就允许再报一次，别把第二次停滞吞掉。
+                        watched.reported.store(false, Ordering::Relaxed);
+                    }
+                }
+            })
+            .ok();
+        Self { shared, join }
+    }
+
+    /// 回调里调一次，代价是一次 QPC 读（与时间戳通道同源，无分配、无锁）。
+    fn touch(shared: &WatchdogShared) {
+        shared.last_nanos.store(wall_nanos(), Ordering::Relaxed);
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.shared.stopped.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
 /// 在一组时间戳里找出包含 `index` 的那个，并换算成设备时刻。
 #[must_use]
 pub fn sample_time(stamps: &[CallbackStamp], index: u64, sample_rate: u32) -> Option<u64> {
@@ -250,6 +341,8 @@ pub struct CaptureHandle {
     pub format: StreamFormat,
     /// 计数。
     pub stats: Arc<CaptureStats>,
+    /// 回调看门狗。只为 Drop 而持有：drop 即停监视。
+    _watchdog: Watchdog,
 }
 
 impl CaptureHandle {
@@ -274,6 +367,8 @@ pub struct PlayoutHandle {
     pub format: StreamFormat,
     /// 计数。
     pub stats: Arc<PlayoutStats>,
+    /// 回调看门狗。只为 Drop 而持有：drop 即停监视。
+    _watchdog: Watchdog,
 }
 
 impl PlayoutHandle {
@@ -498,37 +593,84 @@ fn start_capture_impl(
         sample_format,
     };
     let (shared, local) = capture_stats_pair();
+    // 回调一停就报 Fatal，而不是让上层一直等下去（见 Watchdog 的文档）。
+    let watchdog = Watchdog::start(events.clone(), "采集");
+    let watchdog_shared = Arc::clone(&watchdog.shared);
 
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => {
-            start_input::<f32, _>(&device, config, producer, local, events, stamps, |s| s)
-        }
-        cpal::SampleFormat::I16 => {
-            start_input::<i16, _>(&device, config, producer, local, events, stamps, |s| {
-                f32::from(s) / 32_768.0
-            })
-        }
-        cpal::SampleFormat::U16 => {
-            start_input::<u16, _>(&device, config, producer, local, events, stamps, |s| {
-                (f32::from(s) - 32_768.0) / 32_768.0
-            })
-        }
-        cpal::SampleFormat::I32 => {
-            start_input::<i32, _>(&device, config, producer, local, events, stamps, |s| {
-                s as f32 / 2_147_483_648.0
-            })
-        }
-        cpal::SampleFormat::F64 => {
-            start_input::<f64, _>(&device, config, producer, local, events, stamps, |s| {
-                s as f32
-            })
-        }
+        cpal::SampleFormat::F32 => start_input::<f32, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: producer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| s,
+        ),
+        cpal::SampleFormat::I16 => start_input::<i16, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: producer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| f32::from(s) / 32_768.0,
+        ),
+        cpal::SampleFormat::U16 => start_input::<u16, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: producer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| (f32::from(s) - 32_768.0) / 32_768.0,
+        ),
+        cpal::SampleFormat::I32 => start_input::<i32, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: producer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| s as f32 / 2_147_483_648.0,
+        ),
+        cpal::SampleFormat::F64 => start_input::<f64, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: producer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| s as f32,
+        ),
         // 8-bit 设备（部分虚拟声卡只提供 U8）
-        cpal::SampleFormat::U8 => {
-            start_input::<u8, _>(&device, config, producer, local, events, stamps, |s| {
-                (f32::from(s) - 128.0) / 128.0
-            })
-        }
+        cpal::SampleFormat::U8 => start_input::<u8, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: producer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| (f32::from(s) - 128.0) / 128.0,
+        ),
         other => Err(AudioIoError::Config(format!(
             "暂不支持的采样格式 {other:?}"
         ))),
@@ -542,22 +684,45 @@ fn start_capture_impl(
         stream,
         format,
         stats: shared,
+        _watchdog: watchdog,
     })
+}
+
+/// 回调里要用到的共享句柄。
+///
+/// 打包成一个结构体是为了压住参数个数：采集与播放各一份，环形缓冲与计数的类型不同，所以泛型。
+struct CallbackContext<Q, S> {
+    /// 环形缓冲的一端（采集侧是 `Producer`，播放侧是 `Consumer`）。
+    ring: Q,
+    /// 计数。
+    stats: Arc<S>,
+    /// 错误事件出口。
+    events: Sender<StreamEvent>,
+    /// 时间戳通道（可选）。
+    stamps: Option<rtrb::Producer<CallbackStamp>>,
+    /// 看门狗的共享态。
+    watchdog: Arc<WatchdogShared>,
 }
 
 fn start_input<T, F>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    mut producer: rtrb::Producer<f32>,
-    stats: Arc<CaptureStats>,
-    events: Sender<StreamEvent>,
-    mut stamps: Option<rtrb::Producer<CallbackStamp>>,
+    context: CallbackContext<rtrb::Producer<f32>, CaptureStats>,
     to_f32: F,
 ) -> Result<cpal::Stream, AudioIoError>
 where
     T: cpal::SizedSample + Send + 'static,
     F: Fn(T) -> f32 + Send + 'static,
 {
+    let CallbackContext {
+        ring,
+        stats,
+        events,
+        stamps,
+        watchdog,
+    } = context;
+    let mut producer = ring;
+    let mut stamps = stamps;
     let channels = usize::from(config.channels).max(1);
     let error_stats = Arc::clone(&stats);
     let mut first_index: u64 = 0;
@@ -565,6 +730,7 @@ where
         .build_input_stream::<T, _, _>(
             config,
             move |data: &[T], info: &cpal::InputCallbackInfo| {
+                Watchdog::touch(&watchdog);
                 let frames = (data.len() / channels) as u64;
                 if let Some(sink) = stamps.as_mut() {
                     let stamp = CallbackStamp {
@@ -631,34 +797,82 @@ pub fn start_playout(
         sample_format,
     };
     let (shared, local) = playout_stats_pair();
+    let watchdog = Watchdog::start(events.clone(), "播放");
+    let watchdog_shared = Arc::clone(&watchdog.shared);
 
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => {
-            start_output::<f32, _>(&device, config, consumer, local, events, stamps, |s| s)
-        }
-        cpal::SampleFormat::I16 => {
-            start_output::<i16, _>(&device, config, consumer, local, events, stamps, |s| {
-                (s.clamp(-1.0, 1.0) * 32_767.0) as i16
-            })
-        }
-        cpal::SampleFormat::U16 => {
-            start_output::<u16, _>(&device, config, consumer, local, events, stamps, |s| {
-                ((s.clamp(-1.0, 1.0) * 32_767.0) + 32_768.0) as u16
-            })
-        }
-        cpal::SampleFormat::I32 => {
-            start_output::<i32, _>(&device, config, consumer, local, events, stamps, |s| {
-                (s.clamp(-1.0, 1.0) * 2_147_483_647.0) as i32
-            })
-        }
-        cpal::SampleFormat::F64 => {
-            start_output::<f64, _>(&device, config, consumer, local, events, stamps, f64::from)
-        }
-        cpal::SampleFormat::U8 => {
-            start_output::<u8, _>(&device, config, consumer, local, events, stamps, |s| {
-                ((s.clamp(-1.0, 1.0) * 127.0) + 128.0) as u8
-            })
-        }
+        cpal::SampleFormat::F32 => start_output::<f32, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: consumer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| s,
+        ),
+        cpal::SampleFormat::I16 => start_output::<i16, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: consumer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| (s.clamp(-1.0, 1.0) * 32_767.0) as i16,
+        ),
+        cpal::SampleFormat::U16 => start_output::<u16, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: consumer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| ((s.clamp(-1.0, 1.0) * 32_767.0) + 32_768.0) as u16,
+        ),
+        cpal::SampleFormat::I32 => start_output::<i32, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: consumer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| (s.clamp(-1.0, 1.0) * 2_147_483_647.0) as i32,
+        ),
+        cpal::SampleFormat::F64 => start_output::<f64, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: consumer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            f64::from,
+        ),
+        cpal::SampleFormat::U8 => start_output::<u8, _>(
+            &device,
+            config,
+            CallbackContext {
+                ring: consumer,
+                stats: local,
+                events,
+                stamps,
+                watchdog: watchdog_shared,
+            },
+            |s| ((s.clamp(-1.0, 1.0) * 127.0) + 128.0) as u8,
+        ),
         other => Err(AudioIoError::Config(format!(
             "暂不支持的采样格式 {other:?}"
         ))),
@@ -672,22 +886,29 @@ pub fn start_playout(
         stream,
         format,
         stats: shared,
+        _watchdog: watchdog,
     })
 }
 
 fn start_output<T, F>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    mut consumer: rtrb::Consumer<f32>,
-    stats: Arc<PlayoutStats>,
-    events: Sender<StreamEvent>,
-    mut stamps: Option<rtrb::Producer<CallbackStamp>>,
+    context: CallbackContext<rtrb::Consumer<f32>, PlayoutStats>,
     from_f32: F,
 ) -> Result<cpal::Stream, AudioIoError>
 where
     T: cpal::SizedSample + Send + 'static,
     F: Fn(f32) -> T + Send + 'static,
 {
+    let CallbackContext {
+        ring,
+        stats,
+        events,
+        stamps,
+        watchdog,
+    } = context;
+    let mut consumer = ring;
+    let mut stamps = stamps;
     let channels = usize::from(config.channels).max(1);
     let error_stats = Arc::clone(&stats);
     let mut first_index: u64 = 0;
@@ -695,6 +916,7 @@ where
         .build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                Watchdog::touch(&watchdog);
                 let frames = (data.len() / channels) as u64;
                 let mut real_frames = 0_u64;
                 for frame in data.chunks_exact_mut(channels) {
@@ -741,4 +963,50 @@ where
             None,
         )
         .map_err(|e| AudioIoError::Stream(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stall_threshold_boundary() {
+        let base = 1_000_000_000_u64;
+        assert!(!is_stalled(base, base), "同一时刻不算停滞");
+        assert!(
+            !is_stalled(base, base + CALLBACK_STALL_MS * 1_000_000),
+            "恰好等于阈值不算"
+        );
+        assert!(
+            is_stalled(base, base + CALLBACK_STALL_MS * 1_000_000 + 1),
+            "超过阈值一纳秒就算"
+        );
+    }
+
+    #[test]
+    fn watchdog_reports_a_stalled_stream() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _watchdog = Watchdog::start(sender, "测试");
+        let event = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("回调一直没来，看门狗应当报一条事件");
+        match event {
+            StreamEvent::Fatal { kind, .. } => assert_eq!(kind, "stalled"),
+            other => panic!("期望 Fatal，实际是 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watchdog_stays_quiet_while_callbacks_keep_coming() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(sender, "测试");
+        for _ in 0..12 {
+            Watchdog::touch(&watchdog.shared);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "回调持续到来时不该报警，否则正常播放会被误判成流已死"
+        );
+    }
 }
