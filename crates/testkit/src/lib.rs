@@ -9,6 +9,7 @@
 pub mod alloc;
 pub mod baseline;
 pub mod model;
+pub mod netsim;
 pub mod report;
 pub mod run;
 pub mod synth;
