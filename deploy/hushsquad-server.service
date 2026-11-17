@@ -1,0 +1,60 @@
+# HushSquad 服务器 systemd unit。
+#
+# 安装：
+#   useradd --system --home /var/lib/hushsquad --shell /usr/sbin/nologin hushsquad
+#   install -Dm755 target/release/hushsquad-server /usr/local/bin/hushsquad-server
+#   install -d -o hushsquad -g hushsquad /var/lib/hushsquad /etc/hushsquad
+#   cp cert.pem key.pem users.txt /etc/hushsquad/
+#   chown root:hushsquad /etc/hushsquad/key.pem && chmod 0640 /etc/hushsquad/key.pem
+#   systemctl daemon-reload && systemctl enable --now hushsquad-server
+#
+# 证书与用户表的生成见 docs/部署.md。
+
+[Unit]
+Description=HushSquad voice server (SFU)
+Documentation=file:/usr/local/share/doc/hushsquad/部署.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hushsquad
+Group=hushsquad
+WorkingDirectory=/var/lib/hushsquad
+ExecStart=/usr/local/bin/hushsquad-server \
+    --users /etc/hushsquad/users.txt \
+    --cert /etc/hushsquad/cert.pem \
+    --key /etc/hushsquad/key.pem \
+    --control-bind 0.0.0.0:64738 \
+    --voice-bind 0.0.0.0:64739 \
+    --voice-host voice.example.com \
+    --voice-port 64739 \
+    --channel 大厅 \
+    --channel 游戏 \
+    --metrics-interval 60
+
+Restart=on-failure
+RestartSec=3
+
+# 加固：服务器不需要写文件、不需要提权、只需要两个端口。
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+# 日志只有两类行：`metrics {...}` 与 `event {...}`，都按行解析（见 docs/部署.md）。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

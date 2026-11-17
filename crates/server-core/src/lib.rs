@@ -283,14 +283,14 @@ impl Server {
         epoch
     }
 
-    /// 新建一次控制面会话（握手开始之前）。
+    /// 新建一次控制面会话（TLS 握手完成、还没收到 ClientHello 之前）。
     ///
-    /// `exporter` 是 TLS 1.3 导出器的 64 字节输出，`voice_token` 是服务器生成的 16 字节
-    /// UDP 绑定凭证。两者都由传输层提供，这里只做派生与登记。
+    /// `voice_token` 是服务器生成的 16 字节 UDP 绑定凭证。密钥**不在这里装**：
+    /// TLS 导出器的上下文是 `session_id || voice_token`，而 `session_id` 正是本函数
+    /// 分配的 —— 所以调用方要拿返回值去算上下文、调导出器，再 {@install_keys@}。
     pub fn open_session(
         &mut self,
         name: impl Into<String>,
-        exporter: &[u8; EXPORTER_LEN],
         voice_token: [u8; VOICE_TOKEN_LEN],
     ) -> Option<SessionId> {
         if self.sessions.len() >= self.config.max_sessions {
@@ -303,7 +303,7 @@ impl Server {
         let user_id = self.next_user_id;
         self.next_user_id += 1;
 
-        let keys = derive_voice_keys(exporter, id, self.config.voice_key_epoch);
+        let keys = transport::VoiceKeys::zeroed();
         let session = Session {
             id,
             user_id,
@@ -330,6 +330,18 @@ impl Server {
         self.metrics.sessions_opened += 1;
         self.emit(Event::SessionOpened { session: id });
         Some(id)
+    }
+
+    /// 装入语音密钥（TLS 握手完成后由传输层调用）。
+    ///
+    /// 在这之前会话的密钥是全零，{@Server::handle_datagram@} 会把它当成「密钥不对」而丢弃 ——
+    /// 这是对的：没走完 TLS 的连接本来就不该发语音。
+    pub fn install_keys(&mut self, id: SessionId, exporter: &[u8; EXPORTER_LEN]) -> bool {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        session.keys = derive_voice_keys(exporter, id, self.config.voice_key_epoch);
+        true
     }
 
     /// 关闭并清理一个会话。

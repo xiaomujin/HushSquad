@@ -14,9 +14,7 @@ fn kind_of(msg: &protocol::ControlMessage) -> &'static str {
 #[test]
 fn handshake_returns_server_hello_then_auth_result_then_channel_sync() {
     let mut s = server();
-    let id = s
-        .open_session("alice", &[1u8; 64], [1u8; 16])
-        .expect("会话已满");
+    let id = s.open_session("alice", [1u8; 16]).expect("会话已满");
 
     let hello = protocol::ControlMessage {
         protocol: 1,
@@ -70,7 +68,7 @@ fn handshake_returns_server_hello_then_auth_result_then_channel_sync() {
 #[test]
 fn an_unsupported_version_closes_the_connection() {
     let mut s = server();
-    let id = s.open_session("alice", &[1u8; 64], [1u8; 16]).unwrap();
+    let id = s.open_session("alice", [1u8; 16]).unwrap();
     let hello = protocol::ControlMessage {
         protocol: 1,
         request_id: 1,
@@ -90,7 +88,7 @@ fn an_unsupported_version_closes_the_connection() {
 #[test]
 fn a_bad_password_closes_the_connection() {
     let mut s = server();
-    let id = s.open_session("alice", &[1u8; 64], [1u8; 16]).unwrap();
+    let id = s.open_session("alice", [1u8; 16]).unwrap();
     s.handle_control(
         id,
         protocol::ControlMessage {
@@ -138,19 +136,37 @@ fn joining_a_channel_notifies_both_sides() {
     let b = join(&mut s, "bob", "bob-pw", 2);
 
     let actions = join_channel(&mut s, a.id, lobby);
-    let msgs = sent_messages(&actions);
-    assert_eq!(msgs.len(), 1, "第一个人进频道只通知他自己");
-    assert_eq!(msgs[0].0, a.id);
-    assert_eq!(kind_of(msgs[0].1), "user_joined");
+    let joined: Vec<_> = sent_messages(&actions)
+        .into_iter()
+        .filter(|(_, m)| kind_of(m) == "user_joined")
+        .collect();
+    assert_eq!(joined.len(), 1, "第一个人进频道只通知他自己");
+    assert_eq!(joined[0].0, a.id);
 
     let actions = join_channel(&mut s, b.id, lobby);
     let msgs = sent_messages(&actions);
-    let targets: Vec<_> = msgs.iter().map(|(to, _)| *to).collect();
+    let targets: Vec<_> = msgs
+        .iter()
+        .filter(|(_, m)| kind_of(m) == "user_joined")
+        .map(|(to, _)| *to)
+        .collect();
     assert_eq!(targets.len(), 2, "bob 进频道要通知 alice 和 bob 自己");
     assert!(targets.contains(&a.id));
     assert!(targets.contains(&b.id));
-    for (_, msg) in &msgs {
-        assert_eq!(kind_of(msg), "user_joined");
+    // 成员变了 epoch 也变了：新快照必须推给频道里的人。
+    let updated: Vec<_> = msgs
+        .iter()
+        .filter(|(_, m)| kind_of(m) == "channel_updated")
+        .collect();
+    assert_eq!(updated.len(), 2, "频道快照要推给两个成员");
+    for (_, msg) in updated {
+        let Some(Kind::ChannelUpdated(update)) = &msg.kind else {
+            unreachable!()
+        };
+        assert_eq!(
+            update.channel.as_ref().unwrap().channel_epoch as u16,
+            s.channel(lobby).unwrap().epoch
+        );
     }
 }
 
@@ -165,12 +181,13 @@ fn leaving_a_channel_notifies_the_former_peers() {
 
     let actions = send_control(&mut s, a.id, Kind::LeaveChannel(pb::LeaveChannel {}), 5);
     let msgs = sent_messages(&actions);
-    let targets: Vec<_> = msgs.iter().map(|(to, _)| *to).collect();
+    let targets: Vec<_> = msgs
+        .iter()
+        .filter(|(_, m)| kind_of(m) == "user_left")
+        .map(|(to, _)| *to)
+        .collect();
     assert!(targets.contains(&a.id));
     assert!(targets.contains(&b.id));
-    for (_, msg) in &msgs {
-        assert_eq!(kind_of(msg), "user_left");
-    }
     assert!(s.session(a.id).unwrap().channel.is_none());
     assert_eq!(s.channel(lobby).unwrap().members.len(), 1);
 }

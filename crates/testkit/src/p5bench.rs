@@ -95,8 +95,9 @@ fn fanout_server(peers: usize) -> (Server, SocketAddr, VoiceKeys, u32) {
         let exporter = [seed; 64];
         let token = [seed; 16];
         let id = server
-            .open_session(format!("u{i}"), &exporter, token)
+            .open_session(format!("u{i}"), token)
             .expect("会话已满");
+        assert!(server.install_keys(id, &exporter));
         let hello = ControlMessage {
             protocol: PROTOCOL_VERSION,
             request_id: 1,

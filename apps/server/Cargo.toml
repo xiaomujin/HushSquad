@@ -1,0 +1,30 @@
+[package]
+name = "hushsquad-server"
+description = "HushSquad 服务器：TLS 控制面 + UDP 语音面（SFU）。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hushsquad_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hushsquad-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+protocol = { path = "../../crates/protocol", version = "0.0.0" }
+transport = { path = "../../crates/transport", version = "0.0.0" }
+server-core = { path = "../../crates/server-core", version = "0.0.0" }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+# 只用于集成测试：现场生成一张自签证书，测试不依赖外部 openssl。
+rcgen = "0.14"

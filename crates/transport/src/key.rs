@@ -22,8 +22,14 @@ pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-hushsquad-voice-v1";
 pub const EXPORTER_LEN: usize = 64;
 /// 单个方向的密钥长度（ChaCha20-Poly1305）。
 pub const KEY_LEN: usize = 32;
-/// 导出器上下文长度：8 + 4 + 16。
-pub const EXPORTER_CONTEXT_LEN: usize = 28;
+/// 导出器上下文长度：8 + 16。
+///
+/// **协议草案 §3 原本写的是 `session_id(8) || user_id(4) || voice_token(16)`（28 字节），
+/// 实装时发现它有个循环依赖**：客户端要算这个上下文，就得先知道 `user_id`，而 `user_id`
+/// 要等认证结果；可服务器那边如果也要等认证才派生，就不能在 ServerHello 之前把密钥准备好。
+/// 把 `user_id` 去掉即可 —— 上下文的唯一职责是域分离，而 `session_id` 已经是一次连接
+/// 唯一，`voice_token` 是 16 字节随机量。见协议草案 §12.7。
+pub const EXPORTER_CONTEXT_LEN: usize = 24;
 
 /// 一个方向的 32 字节密钥。
 ///
@@ -83,17 +89,15 @@ impl VoiceKeys {
     }
 }
 
-/// 导出器上下文：`session_id` u64 大端 ++ `user_id` u32 大端 ++ `voice_token` 16 字节。
+/// 导出器上下文：`session_id` u64 大端 ++ `voice_token` 16 字节。
 #[must_use]
 pub fn exporter_context(
     session_id: u64,
-    user_id: u32,
     voice_token: &[u8; protocol::VOICE_TOKEN_LEN],
 ) -> [u8; EXPORTER_CONTEXT_LEN] {
     let mut out = [0u8; EXPORTER_CONTEXT_LEN];
     out[..8].copy_from_slice(&session_id.to_be_bytes());
-    out[8..12].copy_from_slice(&user_id.to_be_bytes());
-    out[12..].copy_from_slice(voice_token);
+    out[8..].copy_from_slice(voice_token);
     out
 }
 
@@ -162,13 +166,12 @@ mod tests {
     }
 
     #[test]
-    fn exporter_context_is_28_bytes_big_endian() {
+    fn exporter_context_is_24_bytes_big_endian() {
         let token = [0xAAu8; 16];
-        let ctx = exporter_context(0x0102_0304_0506_0708, 0x090A_0B0C, &token);
+        let ctx = exporter_context(0x0102_0304_0506_0708, &token);
         assert_eq!(ctx.len(), EXPORTER_CONTEXT_LEN);
         assert_eq!(&ctx[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(&ctx[8..12], &[9, 10, 11, 12]);
-        assert_eq!(&ctx[12..], &[0xAA; 16]);
+        assert_eq!(&ctx[8..], &[0xAA; 16]);
     }
 
     #[test]

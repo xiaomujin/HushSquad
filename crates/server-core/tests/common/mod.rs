@@ -78,9 +78,8 @@ pub fn sent_messages(actions: &[Action]) -> Vec<(SessionId, &ControlMessage)> {
 pub fn connect(server: &mut Server, user: &str, password: &str, token_seed: u8) -> Connected {
     let exporter = [token_seed; 64];
     let voice_token = [token_seed; 16];
-    let id = server
-        .open_session(user, &exporter, voice_token)
-        .expect("会话已满");
+    let id = server.open_session(user, voice_token).expect("会话已满");
+    assert!(server.install_keys(id, &exporter), "会话刚建好就该在");
 
     server.handle_control(id, hello(), NOW);
     let actions = server.handle_control(id, auth(user, password), NOW);

@@ -330,7 +330,8 @@ impl Server {
             )];
         }
 
-        // 先记下旧频道的同伴，离开时要通知他们。
+        // 先记下旧频道与它的同伴，离开时要通知他们。
+        let old_channel = self.session(session_id).and_then(|s| s.channel);
         let old_peers = self.channel_peers(session_id);
         self.place_in_channel(session_id, channel_id);
 
@@ -366,7 +367,52 @@ impl Server {
                 ));
             }
         }
+
+        // **成员变了，epoch 就变了** —— 必须把新的频道快照推给所有相关的人，
+        // 否则客户端会继续用旧的 channel_epoch 发包，服务器一律判「过期」。
+        // 这是 P5 联调时才暴露的缺口：原来只在登录时发一次 ChannelSync。
+        actions.extend(self.broadcast_channel_state(channel_id));
+        if let Some(old) = old_channel {
+            actions.extend(self.broadcast_channel_state(old));
+        }
         actions
+    }
+
+    /// 把一个频道的当前快照推给它的成员 + 自己。
+    fn broadcast_channel_state(&self, channel_id: ChannelId) -> Vec<Action> {
+        let Some(state) = self.channel_state(channel_id) else {
+            return Vec::new();
+        };
+        let mut targets: Vec<SessionId> = self
+            .channels()
+            .get(&channel_id)
+            .map(|c| {
+                c.members
+                    .iter()
+                    .filter_map(|user| {
+                        self.sessions_ready()
+                            .find(|s| s.user_id == *user)
+                            .map(|s| s.id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        targets.sort_unstable();
+        targets.dedup();
+        targets
+            .into_iter()
+            .map(|to| {
+                Action::send(
+                    to,
+                    envelope(
+                        0,
+                        Kind::ChannelUpdated(pb::ChannelUpdated {
+                            channel: Some(state.clone()),
+                        }),
+                    ),
+                )
+            })
+            .collect()
     }
 
     fn on_leave_channel(&mut self, session_id: SessionId) -> Vec<Action> {
@@ -420,21 +466,27 @@ impl Server {
             .collect()
     }
 
+    /// 一个频道的快照。
+    fn channel_state(&self, id: ChannelId) -> Option<pb::ChannelState> {
+        let c = self.channel(id)?;
+        Some(pb::ChannelState {
+            channel_id: c.id,
+            parent_id: c.parent,
+            name: c.name.clone(),
+            position: c.position,
+            max_users: c.max_users,
+            flags: c.flags,
+            description: c.description.clone(),
+            channel_epoch: u32::from(c.epoch),
+        })
+    }
+
     /// 全量频道 + 用户快照。
     fn channel_sync_msg(&self) -> ControlMessage {
         let channels = self
             .channels()
             .values()
-            .map(|c| pb::ChannelState {
-                channel_id: c.id,
-                parent_id: c.parent,
-                name: c.name.clone(),
-                position: c.position,
-                max_users: c.max_users,
-                flags: c.flags,
-                description: c.description.clone(),
-                channel_epoch: u32::from(c.epoch),
-            })
+            .filter_map(|c| self.channel_state(c.id))
             .collect();
         let users = self
             .sessions_ready()
