@@ -3,6 +3,8 @@
 //! 只在 `--features denoise-dfn3` 下跑：这里要验证的正是真实的 DFN3（每帧约 185 次分配）。
 
 #![cfg(feature = "denoise-dfn3")]
+// 测量测试要打印数字。
+#![allow(clippy::print_stdout)]
 
 use std::time::Instant;
 

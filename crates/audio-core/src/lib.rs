@@ -25,11 +25,13 @@
 pub mod chain;
 pub mod codec;
 pub mod jitter;
+pub mod mix;
 pub mod receive;
 pub mod stages;
 
 pub use chain::{Chain, ChainBuildError, ChainDesc, ChainParseError, StageKind};
 pub use codec::{AudioCodec, CodecError, MAX_PACKET_BYTES, OpusCodec, OpusConfig};
+pub use mix::{MAX_TRACKS, MixControl, MixError, MixStats, Mixer, TrackSource};
 pub use stages::{Agc2, Crossfade, Highpass, Rnn, StageWorker, WorkerStage, WorkerStatsSnapshot};
 
 /// 内部统一采样率：48 kHz（技术设计 §6.1）。
