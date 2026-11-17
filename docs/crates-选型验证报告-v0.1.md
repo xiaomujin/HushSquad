@@ -150,7 +150,7 @@ MIT/Apache、2026-11-16 更新，但**仅 12 次下载**，仓库为个人新建
 
 **待验证（D7）**：
 
-1. 关掉 `native` 后是否仍可用？还是它只提供「包→PCM」一体接口、必须接受 `ropus` 解码？若必须接受，就要决策「用 ropus 解码」还是「neteq 只当缓冲、自己解码」；
+1. ~~关掉 `native` 后是否仍可用？还是它只提供「包→PCM」一体接口、必须接受 `ropus` 解码？~~ **已答（2026-11-17，执行记录 9u）**：关掉 `native` 后只剩 log/ringbuf/serde/thiserror/web-time，可用；`AudioDecoder` 是公开 trait，`register_decoder` 收任意实现，**我们自己解码**（`audio-core::jitter`，已跑通）。代价是 trait 签名强制 `Vec` 输出 → 每包分配，抖动缓冲不能进音频回调；
 2. 时间伸缩能消化 ppm 级慢漂移，但**没有显式重采样**——长时漂移仍需外层补偿器，除非 4 小时长跑证明够用；
 3. `buffer_level_filter.rs:106` 有 `sample_rate_hz == 0` 的除零保护分支，说明接口允许未设采样率 → 初始化必须显式传 48 000。
 

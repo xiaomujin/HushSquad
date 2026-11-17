@@ -4,7 +4,17 @@
 [advisories]
 version = 2
 yanked = "deny"        # 被撤回的版本一律不许用
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0293：ringbuf < 0.5.2 的 Consumer::skip/clear 在元素 Drop 会 panic 时会二次释放。
+    # 为什么可以暂时忽略（2026-11-17，见执行方案 执行记录 9u）：
+    #   1) **neteq 0.9.1 的源码里没有任何 ringbuf 引用**（`grep -r ringbuf neteq-0.9.1/src` 为空），
+    #      它只是 Cargo.toml 里的遗留依赖 → 没有调用点，漏洞路径在本仓库不可达；
+    #   2) 我们的代码也不直接依赖 ringbuf（自己的环形缓冲用 rtrb）；
+    #   3) 触发条件还要求元素类型的 Drop 会 panic，而 neteq 环形缓冲里的载荷是 Vec<u8>。
+    # 解除条件：neteq 升级到依赖 ringbuf >= 0.5.2 的版本，或我们换掉 neteq。
+    # 在此之前**不得**新引入任何依赖 ringbuf 0.3 的 crate。
+    "RUSTSEC-2026-0293",
+]
 
 [licenses]
 version = 2
