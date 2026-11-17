@@ -24,9 +24,11 @@
 
 pub mod chain;
 pub mod codec;
+pub mod stages;
 
-pub use chain::{Chain, ChainDesc, ChainParseError, StageKind};
+pub use chain::{Chain, ChainBuildError, ChainDesc, ChainParseError, StageKind};
 pub use codec::{AudioCodec, CodecError, MAX_PACKET_BYTES, OpusCodec, OpusConfig};
+pub use stages::{Agc2, Highpass};
 
 /// 内部统一采样率：48 kHz（技术设计 §6.1）。
 ///

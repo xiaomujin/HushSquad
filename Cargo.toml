@@ -19,7 +19,8 @@ cpal = "0.18"
 rtrb = "0.4"
 rubato = "5"
 nnnoiseless = "0.5"                        # 低延迟档 + VAD
-sonora-agc2 = "0.3"
+sonora-agc2 = "0.3"                         # AGC2（WebRTC 移植，含 RNN VAD），BSD-3
+sonora-simd = "0.3"                         # sonora-agc2 的 SIMD 后端，需要显式选后端
 opus = "0.4"
 neteq = { version = "0.9", default-features = false }   # 必须关默认 feature，否则拉进 axum/tokio
 chacha20poly1305 = "0.11"

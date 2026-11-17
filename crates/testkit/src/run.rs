@@ -83,15 +83,20 @@ pub fn run_samples(
     let warmup = warmup.min(frames.saturating_sub(1));
     let measured = frames - warmup;
 
-    let mut chain = Chain::empty();
-    for kind in desc.stages() {
-        if *kind != StageKind::Opus {
-            return Err(format!(
-                "档位 {} 要到 P3 才实现；P1 只打通直通 + Opus 编解码",
-                kind.name()
-            ));
-        }
-    }
+    let mut chain = Chain::from_desc(desc).map_err(|e| e.to_string())?;
+    // 逐阶段计时：档位名与 `Chain::from_desc` 装进去的顺序一一对应（`opus` 不是 Stage）。
+    let stage_names: Vec<String> = desc
+        .stages()
+        .iter()
+        .filter(|kind| **kind != StageKind::Opus)
+        .map(|kind| kind.name().to_owned())
+        .collect();
+    // 容量预先留够：热路径里 push 不能触发扩容，否则「零分配」断言会误报。
+    let mut stage_ms: Vec<Vec<f64>> = stage_names
+        .iter()
+        .map(|_| Vec::with_capacity(measured))
+        .collect();
+    let mut frame_stage_ms: Vec<f64> = vec![0.0; stage_names.len()];
     let codec_label = codec.label();
     let mut codec = match codec {
         CodecSpec::None => None,
@@ -115,7 +120,13 @@ pub fn run_samples(
         frame.copy_from_slice(chunk);
 
         let start = Instant::now();
-        let vad = chain.process(&mut frame);
+        let vad = if frame_stage_ms.is_empty() {
+            chain.process(&mut frame)
+        } else {
+            // 每帧清零后逐阶段累加，得到「这一帧各阶段各花了多久」。
+            frame_stage_ms.fill(0.0);
+            chain.process_profiled(&mut frame, &mut frame_stage_ms)
+        };
         let after_chain = Instant::now();
 
         let encoded = match codec.as_mut() {
@@ -136,6 +147,9 @@ pub fn run_samples(
 
         if index >= warmup {
             chain_ms.push(elapsed_ms(start, after_chain));
+            for (slot, value) in stage_ms.iter_mut().zip(&frame_stage_ms) {
+                slot.push(*value);
+            }
             if codec.is_some() {
                 enc_ms.push(elapsed_ms(after_chain, after_encode));
                 dec_ms.push(elapsed_ms(after_encode, after_decode));
@@ -169,6 +183,11 @@ pub fn run_samples(
     // 只有真的挂了处理阶段才统计链路耗时；`opus` 是编解码预算标记，不是 Stage。
     if desc.stages().iter().any(|kind| *kind != StageKind::Opus) {
         cpu_ms_per_frame.insert("chain".to_owned(), report::stats(chain_ms));
+        // 逐阶段数字：每个阶段自己读两次时钟，含约 20–40 ns 的计时开销，
+        // 对微秒级的环节（高通）占比可见，对大环节（AGC2）可忽略。
+        for (name, values) in stage_names.iter().zip(stage_ms) {
+            cpu_ms_per_frame.insert(name.clone(), report::stats(values));
+        }
     }
 
     let measured_f = measured as f64;

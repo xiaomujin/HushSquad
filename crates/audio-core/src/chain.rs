@@ -103,6 +103,26 @@ impl fmt::Display for ChainParseError {
 
 impl std::error::Error for ChainParseError {}
 
+/// 按描述构造链路时的失败原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainBuildError {
+    /// 该档位在 `ChainDesc` 里合法，但还没有实现（P3 逐步补齐）。
+    Unimplemented {
+        /// 档位名。
+        name: &'static str,
+    },
+}
+
+impl fmt::Display for ChainBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unimplemented { name } => write!(f, "档位 {name} 还没有实现"),
+        }
+    }
+}
+
+impl std::error::Error for ChainBuildError {}
+
 /// 链路描述：一串档位。空链路用 `"none"` 表示。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChainDesc {
@@ -193,6 +213,55 @@ impl Chain {
         Self { stages: Vec::new() }
     }
 
+    /// 按 [`ChainDesc`] 构造链路。
+    ///
+    /// `opus` 档位被跳过：它是延迟预算的一行，不是 [`Stage`]（编码器在 `codec` 里）。
+    /// 其它档位若还没实现，返回 [`ChainBuildError::Unimplemented`]——**不要**静默跳过，
+    /// 否则报告里的链路与真正跑的链路不是一回事。
+    pub fn from_desc(desc: &ChainDesc) -> Result<Self, ChainBuildError> {
+        let mut chain = Self::empty();
+        for kind in desc.stages() {
+            if *kind == StageKind::Opus {
+                continue;
+            }
+            let stage = crate::stages::build(*kind)
+                .ok_or(ChainBuildError::Unimplemented { name: kind.name() })?;
+            chain.push(stage);
+        }
+        Ok(chain)
+    }
+
+    /// 逐阶段计时版本，**只用于离线测量**（`testkit` 的逐阶段耗时）。
+    ///
+    /// `per_stage_ms` 与链路的阶段一一对应，每次调用往里累加该阶段的耗时（毫秒）。
+    /// 生产路径请用 [`Chain::process`]：它不读时钟。
+    pub fn process_profiled(&mut self, frame: &mut Frame, per_stage_ms: &mut [f64]) -> f32 {
+        self.process_inner(frame, Some(per_stage_ms))
+    }
+
+    /// `process` 与 `process_profiled` 的唯一实现：VAD 传播规则只写一次。
+    fn process_inner(&mut self, frame: &mut Frame, per_stage_ms: Option<&mut [f64]>) -> f32 {
+        let mut vad = 1.0;
+        let mut times = per_stage_ms;
+        for (index, stage) in self.stages.iter_mut().enumerate() {
+            let stage_vad = match times.as_deref_mut() {
+                Some(slots) => {
+                    let start = std::time::Instant::now();
+                    let value = stage.process(frame);
+                    if let Some(slot) = slots.get_mut(index) {
+                        *slot += start.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    value
+                }
+                None => stage.process(frame),
+            };
+            if stage_vad != 1.0 {
+                vad = stage_vad;
+            }
+        }
+        vad
+    }
+
     /// 在链尾追加一个阶段（仅构造期调用）。
     pub fn push(&mut self, stage: Box<dyn Stage>) {
         self.stages.push(stage);
@@ -215,14 +284,7 @@ impl Chain {
     /// 约定 `1.0` 表示「本阶段没有提供 VAD」；返回值取**最后一个给出有效值的阶段**
     /// （通常是降噪档），全链都没有 VAD 时为 `1.0`。
     pub fn process(&mut self, frame: &mut Frame) -> f32 {
-        let mut vad = 1.0;
-        for stage in &mut self.stages {
-            let stage_vad = stage.process(frame);
-            if stage_vad != 1.0 {
-                vad = stage_vad;
-            }
-        }
-        vad
+        self.process_inner(frame, None)
     }
 }
 
@@ -307,6 +369,46 @@ mod tests {
             frame[0] += 1.0;
             self.vad
         }
+    }
+
+    #[test]
+    fn from_desc_builds_implemented_stages_and_skips_opus() {
+        let desc = ChainDesc::parse("highpass,agc2,opus").unwrap();
+        let chain = Chain::from_desc(&desc).expect("highpass/agc2 已实现，应能构造");
+        // opus 不是 Stage（编码器在 codec 里），所以链路自身延迟是 0；
+        // 那 6.5 ms 记在 ChainDesc 的预算里，报告取的是 ChainDesc。
+        assert_eq!(chain.total_latency_ms(), 0.0);
+        assert_eq!(desc.total_latency_ms(), 6.5);
+    }
+
+    #[test]
+    fn from_desc_refuses_unimplemented_stages() {
+        let desc = ChainDesc::parse("rnn").unwrap();
+        let err = Chain::from_desc(&desc)
+            .err()
+            .expect("rnn 尚未实现，构造应失败");
+        assert_eq!(err, ChainBuildError::Unimplemented { name: "rnn" });
+    }
+
+    #[test]
+    fn profiled_processing_matches_plain_processing() {
+        // 计时版本必须与生产路径逐位一致，否则 testkit 的数字说的不是同一件事。
+        let desc = ChainDesc::parse("highpass").unwrap();
+        let mut plain = Chain::from_desc(&desc).unwrap();
+        let mut profiled = Chain::from_desc(&desc).unwrap();
+        let mut times = [0.0_f64; 1];
+        for i in 0..20 {
+            let sample = (i as f32 * 0.1).sin();
+            let mut a: Frame = [0.0; FRAME_SAMPLES];
+            let mut b: Frame = [0.0; FRAME_SAMPLES];
+            a[0] = sample;
+            b[0] = sample;
+            let vad_plain = plain.process(&mut a);
+            let vad_profiled = profiled.process_profiled(&mut b, &mut times);
+            assert_eq!(vad_plain, vad_profiled);
+            assert_eq!(a, b);
+        }
+        assert!(times[0] >= 0.0, "计时为负");
     }
 
     #[test]

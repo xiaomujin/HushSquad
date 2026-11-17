@@ -55,7 +55,36 @@ fn unimplemented_stage_is_rejected_with_hint() {
     let samples = material(10);
     let desc = ChainDesc::parse("rnn").unwrap();
     let err = run_samples(&samples, &desc, CodecSpec::None, 0).unwrap_err();
-    assert!(err.contains("P3"), "报错应指明该档位在 P3 才实现：{err}");
+    assert!(err.contains("rnn"), "报错应指明哪个档位没实现：{err}");
+}
+
+#[test]
+fn implemented_stages_report_per_stage_cost() {
+    // P3-1：高通与 AGC2 已实现，报告里必须逐阶段给耗时，否则「先测量后优化」无从下手。
+    let samples = material(20);
+    let desc = ChainDesc::parse("highpass,agc2").unwrap();
+    let outcome = run_samples(&samples, &desc, CodecSpec::None, 0).expect("回放失败");
+    let cpu = &outcome.report.cpu_ms_per_frame;
+    for key in ["chain", "highpass", "agc2"] {
+        assert!(
+            cpu.contains_key(key),
+            "缺少 {key} 的耗时行：{:?}",
+            cpu.keys().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        outcome.report.allocations_in_hot_path, 0,
+        "处理链热路径出现了分配"
+    );
+    // 链路总 p95 不该小于任一单阶段的 p95（允许 1 µs 的计时抖动）。
+    let chain_p95 = cpu["chain"].p95;
+    for key in ["highpass", "agc2"] {
+        assert!(
+            chain_p95 + 1e-3 >= cpu[key].p95,
+            "{key} 的 p95 {} 超过链路总 p95 {chain_p95}",
+            cpu[key].p95
+        );
+    }
 }
 
 #[test]

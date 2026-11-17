@@ -14,3 +14,7 @@ workspace = true
 # （Windows 上经 scripts/with-msvc.bat，它会补 MSVC 与本机 cmake）。
 # 选型依据：docs/crates-选型验证报告-v0.1.md §2.5；备选 opus-pure（纯 Rust）留作对照实验。
 opus.workspace = true
+# AGC2：WebRTC 的 AGC2 纯 Rust 移植，自带 RNN VAD。选型见 crates-选型验证报告 §2.4。
+# sonora-simd 必须显式依赖：构造 VAD 要指名 SIMD 后端（sonora_agc2 不重导出）。
+sonora-agc2.workspace = true
+sonora-simd.workspace = true

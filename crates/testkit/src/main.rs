@@ -17,7 +17,7 @@ HushSquad 离线测量工具\n\
   testkit run           --in <wav> [--out <wav>] [--chain <desc>] [--codec <spec>] [--report <json>] [--warmup 50]\n\
   testkit latency-model [--chain <desc>] [--codec <spec>]\n\
 \n\
-链路描述 --chain：none | 逗号分隔的 highpass,agc2,rnn,dfn3,opus（P1 只实现 none 与 opus）\n\
+链路描述 --chain：none | 逗号分隔的 highpass,agc2,rnn,dfn3,opus（已实现 none / highpass / agc2 / opus；rnn 待 P3-2、dfn3 待 P3-3）\n\
 编解码   --codec：none | opus[:10ms][:32k]\n\
 \n\
 例：\n\

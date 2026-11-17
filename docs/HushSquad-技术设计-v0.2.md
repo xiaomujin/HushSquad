@@ -223,9 +223,11 @@ InChannel → Reconnecting（掉线，指数退避，保持 UI 状态）
 ```text
 麦克风采集
   → [可选] 回声消除：Android 平台 AEC（VOICE_COMMUNICATION 音源）或桌面 webrtc-audio-processing
+  → 高通（80 Hz，去隆隆声与桌面震动；**必须在 AGC2 之前**，否则低频能量会污染电平估计，
+     让 AGC 低估语音、抬高增益）
   → 降噪：DeepFilterNet3（质量档，算法延迟 30 ms）/ RNNoise（低延迟档，约 10 ms）
   → AGC2（sonora-agc2：自适应数字增益 + 限幅；需与平台 AGC 二选一，避免双重处理）
-  → 高通（80 Hz，去隆隆声与桌面震动）→ 可选的轻度扩展器（静音时压底噪）
+  → 可选的轻度扩展器（静音时压底噪）
   → Opus 10 ms 编码（in-band FEC 开）
   → 冗余封装 + ChaCha20-Poly1305
   → UDP 发送
