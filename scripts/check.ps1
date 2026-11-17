@@ -22,6 +22,14 @@ Write-Host "==> cargo test" -ForegroundColor Cyan
 cargo test --workspace
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: test" -ForegroundColor Red; exit 1 }
 
+Write-Host "==> 质量档 feature（denoise-dfn3）的 clippy + test" -ForegroundColor Cyan
+# DFN3 默认不编译（模型 8.4 MB + ONNX 运行时），所以单独把它的门禁也跑一遍，
+# 否则这块代码可以坏着进主干而没人发现。
+cargo clippy -p audio-core --features denoise-dfn3 --all-targets -- -D warnings
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: clippy (denoise-dfn3)" -ForegroundColor Red; exit 1 }
+cargo test -p audio-core --features denoise-dfn3
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: test (denoise-dfn3)" -ForegroundColor Red; exit 1 }
+
 Write-Host "==> cargo deny check（许可证 / advisory / 来源 / 禁用 crate）" -ForegroundColor Cyan
 cargo deny check
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: deny" -ForegroundColor Red; exit 1 }

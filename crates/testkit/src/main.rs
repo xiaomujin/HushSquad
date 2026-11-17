@@ -14,10 +14,10 @@ HushSquad 离线测量工具\n\
 \n\
 用法：\n\
   testkit gen           --out <dir> [--seed 42] [--seconds 20]\n\
-  testkit run           --in <wav> [--out <wav>] [--chain <desc>] [--codec <spec>] [--report <json>] [--warmup 50]\n\
+  testkit run           --in <wav> [--out <wav>] [--chain <desc>] [--codec <spec>] [--report <json>] [--warmup 50] [--allow-allocations]\n\
   testkit latency-model [--chain <desc>] [--codec <spec>]\n\
 \n\
-链路描述 --chain：none | 逗号分隔的 highpass,rnn,agc2,dfn3,opus（已实现 none / highpass / rnn / agc2 / opus；dfn3 待 P3-3）\n\
+链路描述 --chain：none | 逗号分隔的 highpass,rnn,agc2,dfn3,opus（dfn3 需要 --features denoise-dfn3 才编进二进制）\n\
 编解码   --codec：none | opus[:10ms][:32k]\n\
 \n\
 例：\n\

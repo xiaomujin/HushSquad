@@ -389,11 +389,22 @@ mod tests {
 
     #[test]
     fn from_desc_refuses_unimplemented_stages() {
-        let desc = ChainDesc::parse("dfn3").unwrap();
-        let err = Chain::from_desc(&desc)
-            .err()
-            .expect("dfn3 尚未实现，构造应失败");
-        assert_eq!(err, ChainBuildError::Unimplemented { name: "dfn3" });
+        #[cfg(not(feature = "denoise-dfn3"))]
+        {
+            let desc = ChainDesc::parse("dfn3").unwrap();
+            let err = Chain::from_desc(&desc)
+                .err()
+                .expect("dfn3 未开 feature，构造应失败");
+            assert_eq!(err, ChainBuildError::Unimplemented { name: "dfn3" });
+        }
+        #[cfg(feature = "denoise-dfn3")]
+        {
+            // feature 打开后没有「未实现」的档位可测，改为正向断言：链路能装起来，
+            // 且 dfn3 的 30 ms 如实进预算（环节自报，不是抄常数）。
+            let desc = ChainDesc::parse("highpass,dfn3,agc2").unwrap();
+            let chain = Chain::from_desc(&desc).expect("feature 已开，应能构造");
+            assert_eq!(chain.total_latency_ms(), 30.0);
+        }
     }
 
     #[test]

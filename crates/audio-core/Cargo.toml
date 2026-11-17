@@ -21,3 +21,12 @@ sonora-simd.workspace = true
 # RNNoise 降噪（低延迟档）。**必须关默认 feature**：默认会拉进 CLI 那套（clap/anyhow/dasp/hound），
 # 实时 crate 不能背这些。关掉后只剩 easyfft + once_cell。
 nnnoiseless = { workspace = true, default-features = false }
+# DFN3 质量档：模型（8.4 MB ONNX）与 tract 推理都随包进来，所以**非默认 feature**。
+# 选型见 crates-选型验证报告 §2.3；ARM 推理性能是未验证项（D5）。
+deep-filter-rt = { workspace = true, optional = true }
+# DFN3 的输入输出是 `ndarray::Array2`，必须直接依赖才能构造。
+ndarray = { workspace = true, optional = true }
+
+[features]
+# 只在桌面与高端 Android 打开；关掉时 `stages::build(Dfn3)` 返回 None（链路里会明确报未实现）。
+denoise-dfn3 = ["dep:deep-filter-rt", "dep:ndarray"]

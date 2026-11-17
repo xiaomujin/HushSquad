@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# 透传 audio-core 的 DFN3 开关：默认不编译（tract 全家 + 8.4 MB 模型，编译与产物体积都贵）。
+# 用法：cargo run -p testkit --release --features denoise-dfn3 -- run --chain highpass,dfn3,agc2 ...
+denoise-dfn3 = ["audio-core/denoise-dfn3"]
+
 [dependencies]
 audio-core = { path = "../audio-core", version = "0.0.0" }
 hound.workspace = true

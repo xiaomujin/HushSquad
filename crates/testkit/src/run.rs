@@ -234,6 +234,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
     let mut chain_spec = "none".to_owned();
     let mut codec_spec = "opus:10ms:32k".to_owned();
     let mut warmup = 50_usize;
+    let mut allow_allocations = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -245,6 +246,9 @@ pub fn main(args: &[String]) -> Result<(), String> {
             }
             "--chain" => chain_spec = crate::next_value(args, &mut i, "--chain")?,
             "--codec" => codec_spec = crate::next_value(args, &mut i, "--codec")?,
+            // 只用于「明知会分配、但想先拿到耗时」的实验（例如 DFN3 的 tract 推理）。
+            // 打开后报告照写，但会大声警告：这个链路不能进音频回调。
+            "--allow-allocations" => allow_allocations = true,
             "--warmup" => {
                 warmup = crate::next_value(args, &mut i, "--warmup")?
                     .parse()
@@ -268,10 +272,16 @@ pub fn main(args: &[String]) -> Result<(), String> {
     }
 
     if outcome.report.allocations_in_hot_path != 0 {
-        return Err(format!(
-            "热路径发生了 {} 次分配（必须为 0）：检查 process/encode/decode 里是否有 Vec 扩容、format!、Box::new",
+        if !allow_allocations {
+            return Err(format!(
+                "热路径发生了 {} 次分配（必须为 0）：检查 process/encode/decode 里是否有 Vec 扩容、format!、Box::new",
+                outcome.report.allocations_in_hot_path
+            ));
+        }
+        eprintln!(
+            "警告：热路径有 {} 次分配（--allow-allocations 已放行）。这个链路不能在音频回调里跑，耗时只作参考。",
             outcome.report.allocations_in_hot_path
-        ));
+        );
     }
 
     if outcome.report.profile == "debug" {

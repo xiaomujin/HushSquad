@@ -5,10 +5,14 @@
 //! 最后才允许出现在 `ChainDesc` 的档位里——否则报告会写出一个跑不起来的链路。
 
 pub mod agc2;
+#[cfg(feature = "denoise-dfn3")]
+pub mod dfn3;
 pub mod highpass;
 pub mod rnn;
 
 pub use agc2::Agc2;
+#[cfg(feature = "denoise-dfn3")]
+pub use dfn3::Dfn3;
 pub use highpass::Highpass;
 pub use rnn::Rnn;
 
@@ -25,8 +29,20 @@ pub fn build(kind: StageKind) -> Option<Box<dyn Stage>> {
         StageKind::Highpass => Some(Box::new(Highpass::new())),
         StageKind::Agc2 => Some(Box::new(Agc2::new())),
         StageKind::Rnn => Some(Box::new(Rnn::new())),
-        StageKind::Dfn3 | StageKind::Opus => None,
+        // 模型 8.4 MB + tract 运行时：只有打开 feature 才进二进制。
+        StageKind::Dfn3 => build_dfn3(),
+        StageKind::Opus => None,
     }
+}
+
+#[cfg(feature = "denoise-dfn3")]
+fn build_dfn3() -> Option<Box<dyn Stage>> {
+    Some(Box::new(Dfn3::new()))
+}
+
+#[cfg(not(feature = "denoise-dfn3"))]
+const fn build_dfn3() -> Option<Box<dyn Stage>> {
+    None
 }
 
 #[cfg(test)]
@@ -35,21 +51,41 @@ mod tests {
 
     #[test]
     fn implemented_stages_report_their_kind_name() {
-        for kind in [StageKind::Highpass, StageKind::Agc2, StageKind::Rnn] {
+        #[cfg(feature = "denoise-dfn3")]
+        let kinds = [
+            StageKind::Highpass,
+            StageKind::Agc2,
+            StageKind::Rnn,
+            StageKind::Dfn3,
+        ];
+        #[cfg(not(feature = "denoise-dfn3"))]
+        let kinds = [StageKind::Highpass, StageKind::Agc2, StageKind::Rnn];
+        for kind in kinds {
             let stage = build(kind).unwrap_or_else(|| panic!("{} 应该已实现", kind.name()));
             assert_eq!(stage.name(), kind.name());
+            // 延迟由环节自己报，必须与档位登记的预算值一致（Dfn3 由库报 1440）。
             assert_eq!(stage.latency_samples(), kind.latency_samples());
         }
     }
 
     #[test]
     fn unimplemented_stages_are_not_built() {
-        for kind in [StageKind::Dfn3, StageKind::Opus] {
-            assert!(
-                build(kind).is_none(),
-                "{} 尚未实现，不该能构造",
-                kind.name()
-            );
-        }
+        // `opus` 永远不是 Stage（编码器吃帧吐字节，不满足签名）。
+        assert!(build(StageKind::Opus).is_none(), "opus 不该能构造");
+    }
+
+    #[test]
+    fn dfn3_follows_the_feature_flag() {
+        // feature 关掉时必须「明确不可用」，而不是静默给个直通。
+        #[cfg(feature = "denoise-dfn3")]
+        assert!(
+            build(StageKind::Dfn3).is_some(),
+            "feature 已开，dfn3 应可构造"
+        );
+        #[cfg(not(feature = "denoise-dfn3"))]
+        assert!(
+            build(StageKind::Dfn3).is_none(),
+            "feature 未开，dfn3 不该能构造"
+        );
     }
 }
