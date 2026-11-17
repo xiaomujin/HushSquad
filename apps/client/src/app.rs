@@ -210,7 +210,16 @@ pub struct App {
     last_gc: Instant,
     /// 走过多少个 tick（用来算实际节奏）。
     ticks: u64,
+    /// 上一次 tick 的时刻。用来量「循环有没有迟到」——采集环满丢样本只可能由它引起。
+    last_tick: Instant,
+    /// 相邻两次 tick 间隔超过 LATE_TICK_MS 的次数。
+    late_ticks: u64,
+    /// 最长的一次 tick 间隔（毫秒）。
+    max_late_ms: u64,
 }
+
+/// 一个 tick 超过这个间隔就算「迟到」。10 ms 的节奏留 5 ms 余量。
+const LATE_TICK_MS: u64 = 15;
 /// 跑一次完整会话：起音频、连服务器、进频道、收发，直到退出。
 pub async fn run(cfg: Config) -> Result<Summary, String> {
     // 必须最先做：Windows 默认定时器粒度 15.6 ms，会把 10 ms 的收发节奏拉成 64 Hz（见 timer 模块）。
@@ -445,6 +454,9 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
         last_ping: Instant::now(),
         last_gc: Instant::now(),
         ticks: 0,
+        last_tick: Instant::now(),
+        late_ticks: 0,
+        max_late_ms: 0,
     };
 
     let outcome = app.drive(control, udp).await;
@@ -526,6 +538,16 @@ impl App {
         writer: &mut WriteHalf<TlsStream<TcpStream>>,
     ) -> Result<(), String> {
         self.ticks += 1;
+        // 量一下「上一 tick 到这一 tick 隔了多久」。采集环满丢样本只可能由它引起：
+        // 环里有 16 帧（160 ms）余量，只有循环卡住才会溢出。
+        let now = Instant::now();
+        let gap_ms =
+            u64::try_from(now.duration_since(self.last_tick).as_millis()).unwrap_or(u64::MAX);
+        self.last_tick = now;
+        if gap_ms > LATE_TICK_MS {
+            self.late_ticks += 1;
+            self.max_late_ms = self.max_late_ms.max(gap_ms);
+        }
         self.on_stream_events();
         self.send_voice(udp);
         for peer in self.peers.values_mut() {
@@ -711,6 +733,12 @@ impl App {
                 return;
             };
             path.set_delay_limits(self.cfg.jitter_min_ms, self.cfg.jitter_max_ms);
+            if self.cfg.no_drift {
+                path.set_drift_config(audio_core::DriftConfig {
+                    enabled: false,
+                    ..audio_core::DriftConfig::default()
+                });
+            }
             // 有扬声器就把 PCM 交给混音器；没有就自己抽干，别让环满污染统计。
             let drain = match &self.playout {
                 Some(playout) => {
@@ -792,6 +820,8 @@ impl App {
         let mut jitter = 0_u32;
         let mut target = 0_u32;
         let mut slip = 0_u64;
+        // 前馈量出来的时钟漂移（ppm）。30 s 之后才有意义，所以起播那几行会显示 +0ppm。
+        let mut drift_ppm = 0.0_f32;
         for peer in self.peers.values() {
             let stats = peer.path.stats();
             lost += stats.packets_lost;
@@ -799,6 +829,10 @@ impl App {
             target = target.max(peer.path.target_delay_ms());
             let drift = peer.path.drift_stats();
             slip += drift.excised_samples + drift.inserted_samples;
+            let ppm = peer.path.drift_estimate() * 1e6;
+            if ppm.abs() > drift_ppm.abs() {
+                drift_ppm = ppm;
+            }
         }
         let (mix_under, mix_clipped, mix_peak) =
             self.playout.as_ref().map_or((0, 0, 0.0), |playout| {
@@ -813,8 +847,8 @@ impl App {
             });
         format!(
             "[stats] t={}s out={}f/{}B in={}f/{}B lost={lost} jitter={jitter}ms \
-             target={target}ms slip={slip} mix_under={mix_under} clip={mix_clipped} \
-             peak={mix_peak:.3} rtt={} speaking={}",
+             target={target}ms slip={slip} drift={drift_ppm:+.0}ppm mix_under={mix_under} \
+             clip={mix_clipped} peak={mix_peak:.3} rtt={} speaking={}",
             self.started.elapsed().as_secs(),
             self.frames_out,
             self.bytes_out,
@@ -932,8 +966,10 @@ impl App {
             self.bytes_in as f64 * 8.0 / 1000.0 / seconds,
         );
         println!(
-            "收发节奏 {:.1} Hz（10 ms 节奏应当接近 100）",
-            self.summary().tick_hz
+            "收发节奏 {:.1} Hz（10 ms 节奏应当接近 100）；迟到 {} 次，最长 {} ms",
+            self.summary().tick_hz,
+            self.late_ticks,
+            self.max_late_ms
         );
         println!(
             "序列号空洞丢包 {} 个（其中最多 {} 个是打点包占用的序号，不是真丢）；\

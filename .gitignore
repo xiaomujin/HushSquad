@@ -7,6 +7,13 @@
 /out
 **/*.report.json
 
+# 服务器零配置启动时在当前目录自签出来的证书与账号库
+/hushsquad-cert.pem
+/hushsquad-key.pem
+/hushsquad.db
+/hushsquad.db-wal
+/hushsquad.db-shm
+
 # 测试素材：真实录音不入库（体积大、含个人语音）
 /testdata/raw
 *.wav

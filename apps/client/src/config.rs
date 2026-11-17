@@ -50,6 +50,7 @@ pub const USAGE: &str = r"HushSquad 客户端
   --tone <Hz>             用合成正弦音代替麦克风（验证链路用，不需要声卡）
   --jitter-min <毫秒>     抖动缓冲目标延迟下限（默认 20）
   --jitter-max <毫秒>     抖动缓冲目标延迟上限（默认 60）。调大更抗抖动、延迟更高
+  --no-drift              关掉漂移补偿（拼接会少一些，但两端晶振差要自己扛；诊断用）
   --bind <地址>           本地 UDP 绑定地址（默认 0.0.0.0:0）
 
 运行与观测：
@@ -111,6 +112,8 @@ pub struct Config {
     pub jitter_min_ms: u32,
     /// 抖动缓冲上限（毫秒）。
     pub jitter_max_ms: u32,
+    /// 关掉漂移补偿（诊断用：对比「声音里的加工感」是不是它造成的）。
+    pub no_drift: bool,
     /// 本地 UDP 绑定地址。
     pub bind: String,
     /// 指标打印间隔。
@@ -149,6 +152,7 @@ impl Default for Config {
             tone: None,
             jitter_min_ms: 20,
             jitter_max_ms: 60,
+            no_drift: false,
             bind: "0.0.0.0:0".to_owned(),
             stats_interval: Some(Duration::from_secs(5)),
             // 5 秒一次：打点包会占用一个语音序号，接收端会把它算成 1 个空洞丢包。
@@ -207,6 +211,7 @@ impl Config {
                         .parse()
                         .map_err(|_| "--jitter-max 需要毫秒数".to_owned())?;
                 }
+                "--no-drift" => config.no_drift = true,
                 "--bind" => config.bind = value()?,
                 "--stats-interval" => {
                     config.stats_interval = seconds(&value()?, "--stats-interval")?

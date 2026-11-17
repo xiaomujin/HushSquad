@@ -166,13 +166,13 @@ mod tests {
     use super::*;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
+        // 序号必须进名字：`SystemTime::now().as_nanos()` 在 Windows 上的粒度是几十毫秒，
+        // 两个测试线程很容易落在同一刻度上拿到同一个目录（同 server/tests/e2e.rs 的注释）。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "hushsquad-cert-{tag}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("建临时目录");
         dir

@@ -57,13 +57,16 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let cert = make_cert();
+        // 目录名必须**每个测试唯一**。曾经用的是 `pid + SystemTime::now().as_nanos()`，
+        // 而 Windows 的墙钟粒度在没提升定时器时是 15.6 ms —— 两个测试线程落在同一个时钟
+        // 刻度上就会拿到**同一个目录**，于是 A 的证书和 B 的私钥互相覆盖，服务器拿一对不匹配
+        // 的密钥去握手，客户端报 `InvalidCertificate(BadSignature)`。症状是「随机一条 e2e 挂掉、
+        // 换一条再跑就换成另一条挂」——机器一忙（比如同时在跑长跑基准）就更容易复现。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "hushsquad-e2e-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let cert_path = dir.join("cert.pem");

@@ -255,18 +255,24 @@ impl ReceivePath {
     /// 只处理 16 位回绕下的前向空洞：序号往回走（迟到、重复、重排后到）不计丢失——
     /// 那些包 NetEQ 自己会按序号丢弃或重排，我们不该重复记一遍。
     fn note_seq(&mut self, seq: u16) {
+        // 前向推进量（包）：空洞也算，重复/重排/迟到算 0。这就是漂移前馈的输入——
+        // 「一段时间里序号总共走了多少包」对抖动和丢包都免疫（见 `DriftControl::note_seq_advance`）。
+        let mut advance = 0_u64;
         match self.next_expected {
             None => self.next_expected = Some(seq.wrapping_add(1)),
             Some(expected) => {
                 let ahead = seq.wrapping_sub(expected);
                 if ahead == 0 {
+                    advance = 1;
                     self.next_expected = Some(expected.wrapping_add(1));
                 } else if ahead < 0x8000 {
+                    advance = u64::from(ahead) + 1;
                     self.stats.packets_lost += u64::from(ahead);
                     self.next_expected = Some(seq.wrapping_add(1));
                 }
             }
         }
+        self.drift.note_seq_advance(advance);
     }
 
     /// 统计。
@@ -318,6 +324,14 @@ impl ReceivePath {
     /// 换一套漂移补偿配置（关掉就是完全直通，用于回归对照）。
     pub fn set_drift_config(&mut self, config: DriftConfig) {
         self.drift = DriftControl::new(config);
+    }
+
+    /// 前馈量出来的时钟漂移（比值 − 1）。30 s 之后才有意义，见 [`crate::drift::EPS_MIN_TICKS`]。
+    ///
+    /// 进客户端统计行：「两端晶振差多少」以前只能靠 4 小时长跑推，现在一行就能看见。
+    #[must_use]
+    pub fn drift_estimate(&self) -> f32 {
+        self.drift.drift_estimate()
     }
 
     /// 抖动缓冲的累计统计（P4-4 漂移长跑用）。

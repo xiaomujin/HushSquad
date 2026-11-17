@@ -143,6 +143,8 @@ pub struct DriftTuning {
     pub kp: f32,
     /// 死区（包）。
     pub deadband_packets: f32,
+    /// 是否启用序号前馈。
+    pub feedforward: bool,
 }
 
 impl Default for DriftTuning {
@@ -151,6 +153,7 @@ impl Default for DriftTuning {
             ema_alpha: audio_core::drift::DEFAULT_EMA_ALPHA,
             kp: audio_core::drift::DEFAULT_KP,
             deadband_packets: audio_core::drift::DEFAULT_DEADBAND_PACKETS,
+            feedforward: audio_core::DriftConfig::default().feedforward,
         }
     }
 }
@@ -163,6 +166,7 @@ impl DriftTuning {
             kp: self.kp,
             deadband_packets: self.deadband_packets,
             enabled: compensate,
+            feedforward: self.feedforward,
         }
     }
 }
@@ -242,6 +246,9 @@ pub struct Run {
     pub jitter_peaks: u16,
     /// 是否开启 P4-6 的漂移补偿。
     pub compensate: bool,
+    /// 是否开启序号前馈（默认关，理由见 `DriftConfig::feedforward`）。
+    #[serde(default)]
+    pub feedforward: bool,
     /// 补偿器丢掉的样本数（稳态窗口）。
     pub drift_excised_samples: i64,
     /// 补偿器补进去的样本数（稳态窗口）。
@@ -701,6 +708,7 @@ pub fn run_full(
         loss: net.loss,
         net_seed: net.seed,
         compensate,
+        feedforward: tuning.feedforward,
         drift_excised_samples: steady_excised,
         drift_inserted_samples: steady_inserted_drift,
         extra_pulls: drift_now.extra_pulls,
@@ -1031,6 +1039,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     .map_err(|e| format!("--deadband 不是小数：{e}"))?;
             }
             "--no-compensate" => compensate = false,
+            "--feedforward" => tuning.feedforward = true,
             other => return Err(format!("drift-run 不认识参数 {other:?}")),
         }
         i += 1;

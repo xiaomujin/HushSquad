@@ -35,9 +35,28 @@
 //!
 //! # 拼接口径
 //!
-//! 丢 `d` 个样本：在 `X` 处把 `in[X..X+F]` 淡出、`in[X+d..X+d+F]` 淡入（等功率），输出短 `d`。
+//! 丢 `d` 个样本：在 `X` 处把 `in[X..X+F]` 淡出、`in[X+d..X+d+F]` 淡入，输出短 `d`。
 //! 补 `m` 个样本：把信号在 `X` 处**倒回** `m` 个样本（等于重放 `in[X-m..X]`），再用同样长度的
 //! 交叉淡化接回 `in[X-m+F..]`，输出长 `m`。`F = 64`（1.33 ms）足够盖住 1 ms 级的时间跳变。
+//!
+//! ## 交叉淡化必须**等增益**，不能等功率（C-51，听感「空旷 + 失真」的直接原因）
+//!
+//! 第一版按教科书用了等功率权重 `(cos θ, sin θ)`。这是给**不相关**的两路信号设计的：`cos² + sin² = 1`
+//! 保证的是**功率**守恒，只在两路信号互不相关（功率相加）时才等于**幅度**守恒。
+//!
+//! 我们这里的「两路」是**同一路信号错开 d = 1…2 个样本**（d = MAX_SLIP），相关系数约等于 1。
+//! 于是等功率权重在中点给出 `cos 45° + sin 45° = √2`——**每次拼接都是 1.33 ms、+3 dB 的幅度凸包**。
+//!
+//! 实测（281 s 真机回环，抖动 5–25 ms、真实漂移 0）：混音峰值 **1.404**，恰好是 `√2 × 0.993`；
+//! 实测每秒拼掉 74–104 个样本（本机 90 s A/B：6674 / 90 ≈ 74；用户日志 29 185 / 281.6 s ≈ 104）。
+//! 每次拼接只动 1–2 个样本、但交叉淡化区有 64 个样本，所以这是**每秒几十次**的 +3 dB 凸包，
+//! 听感就是「空旷、发飘、有点失真」。
+//!
+//! 为什么原来的门禁抓不到：`max_step` 量的是**一阶差分**，而 +3 dB 的凸包是**平滑**的
+//! （64 个样本升 3 dB 再降回来，逐点差分只有 `2πA·f/F` 量级），一阶差分判据对它天然失明。
+//! 现在的判据是「幅度守恒」（`a_splice_keeps_the_level`）：拼接区的峰值不得超过输入的峰值。
+//!
+//! 等增益权重 `(1 − w, w)` 在两路相同时**恒等于 1**，与相关性无关，是这个场景唯一正确的选择。
 //!
 //! # 为什么「少拉一帧」必须**一个样本都不写**
 //!
@@ -61,12 +80,49 @@
 //! 控制器每 tick 都饱和在 ±`MAX_SLIP`。实测 1 小时「抖动 0–10 ms + 0.5 % 丢包」：
 //! 丢 178 k、补 265 k 个样本，而真正的漂移只有 17 k —— **26 倍的无效工作**。
 //!
-//! 它没有变坏（0 下溢、0 硬跳变、0 软跳变、`max_step` 只是平滑上界的 1.49 倍），但这份工作是白做的。
-//! 正确的修法**不是**把 EMA 放慢：闭环特征方程是 `s² + αs + kp = 0`，α 必须 ≥ 2√kp 才不振荡，
-//! 实测 α = 0.0005、kp = 0.02 时 Q ≈ 283，反向 4 小时里丢 30 918、补 40 635 个样本，两个方向
-//! 在对打。真正该换的是**传感器**：漂移可以从「序号推进 / tick 推进」直接量出来
-//! （`Δseq / Δtick − 1`），这个比值对抖动和丢包都免疫，量出来就是 ε，不需要反馈环去猜。
-//! 那需要网络层把序号喂进来，属于 P5 的接线范围，所以这一版先记在这里。
+//! 它没有变坏（0 下溢、0 硬跳变、0 软跳变），但这份工作是白做的。
+//!
+//! ## 前馈传感器写好了、也量准了，但**默认关着**
+//!
+//! 漂移可以从「序号推进 / tick 推进」直接量出来（`Δseq / Δtick − 1`），对抖动和丢包都免疫，
+//! 实现在 [`DriftControl::note_seq_advance`]，单元测试钉住它在 0/±100 ppm 下误差 < 20 ppm。
+//! 但把它接进控制环之后，**+100 ppm 的四小时长跑从绿变红**：
+//!
+//! | +100 ppm / 4 小时 / 理想链路 | 前馈关 | 前馈开 |
+//! |---|---:|---:|
+//! | 稳态缓冲深度 | **12.19 ms** | 28.11 ms（顶出预算） |
+//! | 多拉 / 少拉帧 | 147 / 1 | 36 603 / 36 458 |
+//! | 丢 / 补样本 | 68 858 / 0 | 785 772 / 717 499 |
+//!
+//! 「净」量两边都对（丢减补 = 68 273 vs 68 858，都是漂移本身），但前馈那一版把环推进了一个
+//! 约 20 tick 周期的极限环：前馈是一个**不经过传感器**的直流偏置，它叠在 PCM 环水位的继电规则
+//! （< 一帧就多拉、> 两帧就少拉）上，让环在两边界之间来回撞，碰撞本身又把排队深度打散、
+//! 反馈环跟着反向使劲。所以它没能省下无效功，反而把「已被验证」的 ±100 ppm 长跑弄坏了。
+//!
+//! 结论：**开关默认 false**，代码与测量都留着。要重开它，得先回答一个问题——
+//! 那份无效工作为什么在替延迟预算兜底（见下表）。
+//!
+//! ## 还有一件事：这份「抖动」不是网络的
+//!
+//! 本机 127.0.0.1 回环（RTT 0.1 ms、0 丢包）照样每秒做 ~74 个样本的无效拼接，量级与真机联网一致。
+//! 也就是说推动补偿器的是**我们自己两个进程的 10 ms 相位差**，不是网络抖动。
+//!
+//! 更麻烦的是：这份无效工作**正在替延迟预算兜底**。
+//!
+//! | 配置（0 ppm + 0–10 ms 抖动） | 无效拼接 | 稳态缓冲深度 |
+//! |---|---|---|
+//! | 补偿器默认 | 25 214 样本 | **17.8 ms** |
+//! | EMA 0.005 / kp 0.005 | 4 385 样本 | 30.6 ms（顶出预算） |
+//! | 死区调到 0.25 包 | 17 568 样本 | 30.5 ms（顶出预算） |
+//! | 关掉补偿 | 0 | 28.8 ms（顶出预算） |
+//!
+//! 结论：**延迟达标是过度补偿的副产品**。真正该修的是「NetEQ 为什么停不在 20 ms 目标上」，
+//! 那在 `jitter.rs` 一侧，不是这个补偿器能解决的。所以这一版只做一件事：
+//!
+//! **让拼接本身听不出来**——等增益交叉淡化，消掉每次拼接的 +3 dB 凸包（C-51，见上）。
+//!
+//! `±100 ppm` 正反向 4 小时、`+100 ppm + 10 ms 抖动` 1 小时都仍然是绿的，没有回归。
+//! C-37 保持打开，改成「等 `jitter.rs` 的目标延迟修好之后重做」。
 
 use crate::FRAME_SAMPLES;
 
@@ -88,10 +144,12 @@ pub const DEFAULT_TARGET_PACKETS: f32 = 2.0;
 /// 一小时丢了 178 k、补了 265 k 个样本，而真正的漂移只有 17 k——26 倍的无效工作，听感上是
 /// 持续的轻微抖动。把 EMA 放到秒级能把这份工作压掉 33 倍。
 ///
-/// **但放慢 EMA 会毁掉环的阻尼**：闭环特征方程是 `s² + αs + kp = 0`，α 必须 ≥ 2√kp 才
-/// 不振荡。α = 0.05、kp = 0.02 时 Q ≈ 5.6（几百个 tick 收干净）；α = 0.0005 时 Q ≈ 283，
-/// 实测反向 4 小时里丢 30 918、补 40 635 个样本——两个方向在对打。所以这一版**不动** EMA，
-/// 联合长跑的过度补偿记成已知缺陷（C-37），正确修法是换传感器（见 `DriftControl` 的文档）。
+/// **放慢 EMA 试过，失败了——卡住的不是阻尼，是延迟预算**（记进 measurements.md C-37）：
+/// 0.005（2 s）配 kp 0.005 确实把「0 ppm + 10 ms 抖动」下的无效拼接从 25 214 个样本压到 4 385，
+/// 但**缓冲深度从 17.8 ms 涨到 30.6 ms**，直接顶出 15–20 ms 预算。原因是这份「无效工作」
+/// 本来正在把 NetEQ 自己的 28.8 ms 硬拽回 17.8 ms（关掉补偿实测 28.8 ms）——延迟达标是
+/// 过度补偿的**副产品**，不是控制环的正确工作点。这条路要通，得先弄清 NetEQ 为什么停不在
+/// 目标上，属于另一件事，所以 EMA 与增益都维持原值。
 pub const DEFAULT_EMA_ALPHA: f32 = 0.05;
 
 /// 比例增益：排队包数的误差 → 本 tick 该丢的样本数。
@@ -106,6 +164,10 @@ pub const DEFAULT_KP: f32 = 0.02;
 /// 队列是按整包计量的，采样点上天然有 ±1 包的跳变；没有死区的话，滤波后的残余纹波会让
 /// 补偿器每 tick 都做一次 ±1 样本的拼接——实测 4 小时里有 24 % 的样本流过拼接点，
 /// 白白把 `max_step` 抬到平滑上界的 4 倍。
+///
+/// **调大死区来压无效拼接也试过，同样不行**：0.25（±2.5 ms 内不动作）下「0 ppm + 10 ms 抖动」的
+/// 缓冲深度是 30.5 ms，比死区 0.005 的 17.8 ms 差，甚至比**关掉补偿**的 28.8 ms 还差。
+/// 死区一开，补偿器就失去了「把深度往目标上拽」的那点权限，而延迟预算正是靠这份权限撑住的。
 pub const DEFAULT_DEADBAND_PACKETS: f32 = 0.005;
 
 /// 每 tick 最多丢/补多少样本。4 个样本 = 0.083 ms，即最多 0.83 % 的瞬时压缩率。
@@ -116,6 +178,17 @@ const MAX_SLIP: i32 = 2;
 
 /// 交叉淡化长度（样本）。1.33 ms。
 const CROSSFADE: usize = 64;
+
+/// 前馈建准所需的最少 tick 数（1 tick = 10 ms，3 000 tick = 30 s）。
+///
+/// `Δseq / Δtick` 的分辨率是 `1/Δticks`：10 s 时是 10 000 ppm、100 s 时 100 ppm、1 000 s 时
+/// 10 ppm。漂移是**直流**，窗口越长越准，所以这里只要「别用太短的窗口」，越往后面越精确。
+/// 30 s 起用（≈330 ppm 分辨率）就足以把 `±100 ppm` 从「靠反馈环慢慢猜」变成「直接量出来」。
+pub const EPS_MIN_TICKS: u64 = 3_000;
+
+/// 前馈的饱和上限（ppm）。真实晶振不会差过 1 ‰；超过就说明序号统计被打断（中途入会、
+/// 发送方开 DTX 停发、或序号跳变），这时宁可不前馈，交给反馈环。
+const EPS_LIMIT: f32 = 1_000.0;
 
 /// 输出缓冲的上限：两帧加最多一次插入。`ReceivePath` 按这个尺寸备缓冲。
 pub const MAX_OUTPUT_SAMPLES: usize = 2 * FRAME_SAMPLES + MAX_SLIP as usize;
@@ -147,6 +220,13 @@ pub struct DriftConfig {
     pub deadband_packets: f32,
     /// 关掉就是完全直通（逐样本一致），用于回归对照。
     pub enabled: bool,
+    /// 开启序号前馈（见 [DriftControl::note_seq_advance]）。
+    ///
+    /// **默认关闭**：实测它会把 +100 ppm 的四小时长跑从「稳态 12.19 ms、多拉 147 次」推成
+    /// 「稳态 28.11 ms、多拉 36 603 次 / 少拉 36 458 次」，也就是把环推进了一个 20 tick 周期的
+    /// 极限环（叠在 PCM 环水位继电规则上的直流偏置）。C-37 的账在那之前没算清（那份无效工作
+    /// 正在替延迟预算兜底），所以先把开关留着、默认关掉；等 `jitter.rs` 的目标延迟修好之后再回来。
+    pub feedforward: bool,
 }
 
 impl Default for DriftConfig {
@@ -157,6 +237,7 @@ impl Default for DriftConfig {
             kp: DEFAULT_KP,
             deadband_packets: DEFAULT_DEADBAND_PACKETS,
             enabled: true,
+            feedforward: false,
         }
     }
 }
@@ -195,6 +276,14 @@ pub struct DriftStats {
 pub struct DriftControl {
     config: DriftConfig,
     filtered: f32,
+    /// 已经过的 tick 数。前馈的「时间轴」。
+    ticks: u64,
+    /// 序号前向推进的总包数（含网络丢掉的那些空洞）。前馈的「信号轴」。
+    seq_advance: u64,
+    /// 序号第一次推进时的 tick。前馈只在**这一段**区间上取比值，否则开播那几秒会算成负漂移。
+    seq_start_tick: Option<u64>,
+    /// 前馈用的漂移估计（`Δseq / Δtick − 1`）。
+    eps: f32,
     /// 带小数的「本 tick 该丢多少样本」。整数部分才是这一 tick 真正丢的。
     ///
     /// 必须有这个累加器：100 ppm 下稳态只需每 tick 丢 **0.048** 个样本，直接取整会永远是 0，
@@ -206,10 +295,14 @@ pub struct DriftControl {
     stats: DriftStats,
 }
 
-/// 等功率权重：`i` 从 0 到 `CROSSFADE-1`，返回 `(淡出, 淡入)`。
+/// 等**增益**权重：`i` 从 0 到 `CROSSFADE-1`，返回 `(淡出, 淡入)`，两者之和恒为 1。
+///
+/// **不要改成等功率（`cos/sin`）**：那套权重只对不相关信号幅度守恒，而这里交叉淡化的两路是
+/// 同一路信号错开 1–2 个样本（相关系数 ≈ 1），等功率在中点给出 `√2`＝+3 dB 的幅度凸包。
+/// 实测症状与推导见模块文档「交叉淡化必须等增益」。
 fn weights(i: usize) -> (f32, f32) {
-    let theta = std::f32::consts::FRAC_PI_2 * (i as f32 + 0.5) / CROSSFADE as f32;
-    (theta.cos(), theta.sin())
+    let w = (i as f32 + 0.5) / CROSSFADE as f32;
+    (1.0 - w, w)
 }
 
 /// 在 `input` 上做一次丢（`slip > 0`）或补（`slip < 0`）的拼接，返回输出长度。
@@ -274,6 +367,10 @@ impl DriftControl {
             // 让补偿器把「刚开机还没收到包」当成「缓冲太浅」，一路补样本、把环推满，然后花
             // 几分钟收回来——实测 EMA 0.0005 时 5 分钟跑法的「稳态」里全是这段尾巴。
             filtered: config.target_packets,
+            ticks: 0,
+            seq_advance: 0,
+            seq_start_tick: None,
+            eps: 0.0,
             accum: 0.0,
             slip: 0,
             // 环水位**如实**从 0 开始记账。之前这里给了「一帧垫子」，等于让估计值比真实
@@ -283,8 +380,47 @@ impl DriftControl {
         }
     }
 
+    /// 网络侧喂一记「序号往前走了多少包」，用来把漂移从**序号推进 / tick 推进**直接量出来。
+    ///
+    /// 为什么这条传感器比「排队包数」干净（C-37 的修法）：
+    ///
+    /// - **抖动免疫**：抖动只改变**单个包到得早还是晚**，不改变「一段时间里序号总共走了多少」。
+    ///   排队包数则相反——它同时被漂移（直流）和抖动（交流）推动，而 200 ms 的 EMA 滤不掉
+    ///   10–100 ms 的抖动，于是控制器每 tick 都饱和，做的是无效功（实测 26 倍）。
+    /// - **丢包免疫**：丢掉的包不会让序号停下，调用方喂的是**空洞也算**的前向推进量。
+    /// - **它就是 ε**：发送方每 tick 产 `1+ε` 个包，所以 `Δseq/Δticks − 1 = ε`，不需要反馈环去猜。
+    ///
+    /// 发送方开 DTX 时这条传感器失效（序号只在他说话时走），所以估算被 [`EPS_LIMIT`] 夹住，
+    /// 那种场合的漂移仍然由反馈环兜。
+    pub fn note_seq_advance(&mut self, packets: u64) {
+        if packets == 0 {
+            return;
+        }
+        if self.seq_start_tick.is_none() {
+            self.seq_start_tick = Some(self.ticks);
+        }
+        self.seq_advance = self.seq_advance.saturating_add(packets);
+    }
+
+    /// 当前的前馈漂移估计（每秒比值 − 1）。
+    #[must_use]
+    pub fn drift_estimate(&self) -> f32 {
+        self.eps
+    }
+
     /// 每 tick 开头调一次：喂当前排队包数，返回本 tick 该拉几帧。
     pub fn begin_tick(&mut self, queued_packets: u32) -> PullPlan {
+        self.ticks += 1;
+        // 漂移估计**永远更新**（统计行要用它显示「两端晶振差多少」），
+        // 但只有 feedforward 打开时才进控制环。
+        self.eps = match self.seq_start_tick {
+            Some(start) if self.ticks.saturating_sub(start) >= EPS_MIN_TICKS => {
+                let span = self.ticks - start;
+                let ratio = self.seq_advance as f32 / span as f32;
+                (ratio - 1.0).clamp(-EPS_LIMIT, EPS_LIMIT)
+            }
+            _ => 0.0,
+        };
         if !self.config.enabled {
             self.slip = 0;
             return PullPlan::One;
@@ -296,7 +432,15 @@ impl DriftControl {
         if error_packets.abs() < self.config.deadband_packets {
             error_packets = 0.0;
         }
-        self.accum += error_packets * FRAME_SAMPLES as f32 * self.config.kp;
+        // 前馈：量出来的漂移，单位是「每 tick 该丢多少样本」。**默认不进环**（见 DriftConfig）——
+        // 它会让 +100 ppm 的四小时长跑顶出延迟预算，理由与数据都记在那里。
+        let feedforward = if self.config.feedforward {
+            self.eps
+        } else {
+            0.0
+        };
+        self.accum += FRAME_SAMPLES as f32 * feedforward
+            + error_packets * FRAME_SAMPLES as f32 * self.config.kp;
         let limit = MAX_SLIP as f32 * 8.0;
         self.accum = self.accum.clamp(-limit, limit);
         let mut slip = self
@@ -456,6 +600,64 @@ mod tests {
             assert!(
                 step < 3.0 * bound,
                 "slip = {slip} 的拼接撕裂了波形：一阶差分 {step:.4} vs 平滑上界 {bound:.4}"
+            );
+        }
+    }
+
+    /// 交叉淡化的两路在这里是**同一路信号错开 1–2 个样本**，所以权重必须等增益。
+    ///
+    /// 这条是 C-51 的回归判据：等功率（`cos/sin`）在中点给出 `√2`，也就是每次拼接一个
+    /// +3 dB、1.33 ms 的幅度凸包。实测真机回环的混音峰值 1.404 ≈ `√2 × 0.993` 就是这么来的。
+    #[test]
+    fn a_splice_keeps_the_level() {
+        let input = tone(1);
+        let in_peak = input.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()));
+        let mut out = [0.0_f32; MAX_OUTPUT_SAMPLES];
+        for slip in [-MAX_SLIP, -1, 1, MAX_SLIP] {
+            let len = splice(&input, slip, &mut out);
+            let out_peak = out[..len].iter().fold(0.0_f32, |acc, s| acc.max(s.abs()));
+            assert!(
+                out_peak <= in_peak * 1.001,
+                "slip = {slip} 的拼接抬了电平：峰值 {out_peak:.4} vs 输入 {in_peak:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn crossfade_weights_sum_to_one() {
+        for i in 0..CROSSFADE {
+            let (fade_out, fade_in) = weights(i);
+            assert!(
+                (fade_out + fade_in - 1.0).abs() < 1e-6,
+                "第 {i} 个交叉淡化权重不是等增益：{fade_out} + {fade_in}"
+            );
+        }
+    }
+
+    /// 前馈必须把注入的漂移直接量出来，而不是靠反馈环去猜。
+    #[test]
+    fn the_feedforward_reads_the_injected_drift() {
+        for ppm in [0.0_f64, 100.0, -100.0] {
+            let mut control = DriftControl::new(DriftConfig {
+                feedforward: true,
+                ..DriftConfig::default()
+            });
+            let mut acc = 0.0_f64;
+            let ticks = 200_000_usize;
+            for _ in 0..ticks {
+                control.begin_tick(2);
+                acc += 1.0 + ppm * 1e-6;
+                let whole = acc.floor();
+                control.note_seq_advance(whole as u64);
+                acc -= whole;
+            }
+            let expected = (ppm * 1e-6) as f32;
+            let got = control.drift_estimate();
+            // 200 000 个 tick 的分辨率是 5 ppm，给 20 ppm 的余量。
+            assert!(
+                (got - expected).abs() < 20e-6,
+                "{ppm} ppm 的漂移量成了 {:.1} ppm",
+                got * 1e6
             );
         }
     }
