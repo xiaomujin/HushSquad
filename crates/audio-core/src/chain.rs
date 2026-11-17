@@ -255,7 +255,8 @@ impl Chain {
                 }
                 None => stage.process(frame),
             };
-            if stage_vad != 1.0 {
+            // **第一个**给出有效值的阶段胜出（见 `process` 的文档）。
+            if vad == 1.0 && stage_vad != 1.0 {
                 vad = stage_vad;
             }
         }
@@ -281,8 +282,13 @@ impl Chain {
 
     /// 原地处理一帧，返回 VAD 概率。
     ///
-    /// 约定 `1.0` 表示「本阶段没有提供 VAD」；返回值取**最后一个给出有效值的阶段**
-    /// （通常是降噪档），全链都没有 VAD 时为 `1.0`。
+    /// 约定 `1.0` 表示「本阶段没有提供 VAD」；返回值取**第一个给出有效值的阶段**，
+    /// 全链都没有 VAD 时为 `1.0`。
+    ///
+    /// 为什么是第一个而不是最后一个：设计顺序是 高通 → 降噪 → AGC2，降噪排在前，
+    /// 它的 VAD 是**为「这段是不是语音」训练的**，下游 DTX 与「谁在说话」要的正是这个判据；
+    /// AGC2 内部的 RNN VAD 只服务于它自己的增益决策（而且它看的是降噪后的信号，判据被
+    /// 降噪器改写过）。所以链路对外暴露降噪档的 VAD，而不是最后一级的。
     pub fn process(&mut self, frame: &mut Frame) -> f32 {
         self.process_inner(frame, None)
     }
@@ -383,11 +389,11 @@ mod tests {
 
     #[test]
     fn from_desc_refuses_unimplemented_stages() {
-        let desc = ChainDesc::parse("rnn").unwrap();
+        let desc = ChainDesc::parse("dfn3").unwrap();
         let err = Chain::from_desc(&desc)
             .err()
-            .expect("rnn 尚未实现，构造应失败");
-        assert_eq!(err, ChainBuildError::Unimplemented { name: "rnn" });
+            .expect("dfn3 尚未实现，构造应失败");
+        assert_eq!(err, ChainBuildError::Unimplemented { name: "dfn3" });
     }
 
     #[test]
@@ -409,6 +415,27 @@ mod tests {
             assert_eq!(a, b);
         }
         assert!(times[0] >= 0.0, "计时为负");
+    }
+
+    #[test]
+    fn first_vad_stage_wins() {
+        // 两个都提供 VAD 的阶段：按设计顺序降噪在前，对外暴露的应是它的判据。
+        let mut chain = Chain::new(vec![
+            Box::new(FakeStage {
+                name: "rnn",
+                latency: 480,
+                vad: 0.8,
+                calls: 0,
+            }),
+            Box::new(FakeStage {
+                name: "agc2",
+                latency: 0,
+                vad: 0.1,
+                calls: 0,
+            }),
+        ]);
+        let mut frame: Frame = [0.0; FRAME_SAMPLES];
+        assert_eq!(chain.process(&mut frame), 0.8);
     }
 
     #[test]

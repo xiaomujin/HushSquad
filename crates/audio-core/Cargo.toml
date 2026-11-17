@@ -18,3 +18,6 @@ opus.workspace = true
 # sonora-simd 必须显式依赖：构造 VAD 要指名 SIMD 后端（sonora_agc2 不重导出）。
 sonora-agc2.workspace = true
 sonora-simd.workspace = true
+# RNNoise 降噪（低延迟档）。**必须关默认 feature**：默认会拉进 CLI 那套（clap/anyhow/dasp/hound），
+# 实时 crate 不能背这些。关掉后只剩 easyfft + once_cell。
+nnnoiseless = { workspace = true, default-features = false }

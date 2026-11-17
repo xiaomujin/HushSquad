@@ -6,9 +6,11 @@
 
 pub mod agc2;
 pub mod highpass;
+pub mod rnn;
 
 pub use agc2::Agc2;
 pub use highpass::Highpass;
+pub use rnn::Rnn;
 
 use crate::Stage;
 use crate::chain::StageKind;
@@ -22,7 +24,8 @@ pub fn build(kind: StageKind) -> Option<Box<dyn Stage>> {
     match kind {
         StageKind::Highpass => Some(Box::new(Highpass::new())),
         StageKind::Agc2 => Some(Box::new(Agc2::new())),
-        StageKind::Rnn | StageKind::Dfn3 | StageKind::Opus => None,
+        StageKind::Rnn => Some(Box::new(Rnn::new())),
+        StageKind::Dfn3 | StageKind::Opus => None,
     }
 }
 
@@ -32,7 +35,7 @@ mod tests {
 
     #[test]
     fn implemented_stages_report_their_kind_name() {
-        for kind in [StageKind::Highpass, StageKind::Agc2] {
+        for kind in [StageKind::Highpass, StageKind::Agc2, StageKind::Rnn] {
             let stage = build(kind).unwrap_or_else(|| panic!("{} 应该已实现", kind.name()));
             assert_eq!(stage.name(), kind.name());
             assert_eq!(stage.latency_samples(), kind.latency_samples());
@@ -41,7 +44,7 @@ mod tests {
 
     #[test]
     fn unimplemented_stages_are_not_built() {
-        for kind in [StageKind::Rnn, StageKind::Dfn3, StageKind::Opus] {
+        for kind in [StageKind::Dfn3, StageKind::Opus] {
             assert!(
                 build(kind).is_none(),
                 "{} 尚未实现，不该能构造",

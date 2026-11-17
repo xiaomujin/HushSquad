@@ -53,19 +53,19 @@ fn passthrough_without_codec_is_identity() {
 #[test]
 fn unimplemented_stage_is_rejected_with_hint() {
     let samples = material(10);
-    let desc = ChainDesc::parse("rnn").unwrap();
+    let desc = ChainDesc::parse("dfn3").unwrap();
     let err = run_samples(&samples, &desc, CodecSpec::None, 0).unwrap_err();
-    assert!(err.contains("rnn"), "报错应指明哪个档位没实现：{err}");
+    assert!(err.contains("dfn3"), "报错应指明哪个档位没实现：{err}");
 }
 
 #[test]
 fn implemented_stages_report_per_stage_cost() {
     // P3-1：高通与 AGC2 已实现，报告里必须逐阶段给耗时，否则「先测量后优化」无从下手。
     let samples = material(20);
-    let desc = ChainDesc::parse("highpass,agc2").unwrap();
+    let desc = ChainDesc::parse("highpass,rnn,agc2").unwrap();
     let outcome = run_samples(&samples, &desc, CodecSpec::None, 0).expect("回放失败");
     let cpu = &outcome.report.cpu_ms_per_frame;
-    for key in ["chain", "highpass", "agc2"] {
+    for key in ["chain", "highpass", "rnn", "agc2"] {
         assert!(
             cpu.contains_key(key),
             "缺少 {key} 的耗时行：{:?}",
@@ -78,7 +78,7 @@ fn implemented_stages_report_per_stage_cost() {
     );
     // 链路总 p95 不该小于任一单阶段的 p95（允许 1 µs 的计时抖动）。
     let chain_p95 = cpu["chain"].p95;
-    for key in ["highpass", "agc2"] {
+    for key in ["highpass", "rnn", "agc2"] {
         assert!(
             chain_p95 + 1e-3 >= cpu[key].p95,
             "{key} 的 p95 {} 超过链路总 p95 {chain_p95}",
