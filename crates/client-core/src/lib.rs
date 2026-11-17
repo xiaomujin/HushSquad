@@ -139,6 +139,8 @@ pub struct Client {
     session_id: u64,
     sender_id: u32,
     voice_token: [u8; 16],
+    /// 服务器给的密钥世代（来自 ServerHello）。派生语音密钥要用它。
+    key_epoch: u16,
     voice_host: String,
     voice_port: u16,
     keys: VoiceKeys,
@@ -168,6 +170,7 @@ impl Client {
             session_id: 0,
             sender_id: 0,
             voice_token: [0u8; 16],
+            key_epoch: 0,
             voice_host: String::new(),
             voice_port: 0,
             keys: VoiceKeys::zeroed(),
@@ -201,6 +204,19 @@ impl Client {
     #[must_use]
     pub const fn sender_id(&self) -> u32 {
         self.sender_id
+    }
+
+    /// 语音面的绑定凭证。服务器只认它，所以调用方拿它去发 Bind 包。
+    #[must_use]
+    pub const fn voice_token(&self) -> &[u8; 16] {
+        &self.voice_token
+    }
+
+    /// 服务器给的密钥世代（ServerHello 里那个）。派生语音密钥时原样传给
+    /// [`Client::set_exporter`]。
+    #[must_use]
+    pub const fn key_epoch(&self) -> u16 {
+        self.key_epoch
     }
 
     /// 语音面地址。
@@ -345,6 +361,7 @@ impl Client {
                 self.sender_id = hello.sender_id;
                 self.voice_host = hello.voice_host;
                 self.voice_port = hello.voice_port as u16;
+                self.key_epoch = hello.key_epoch as u16;
                 if let Ok(token) = <[u8; 16]>::try_from(hello.voice_token.as_slice()) {
                     self.voice_token = token;
                 }
@@ -480,12 +497,16 @@ impl Client {
     }
 
     /// 加密一个打点包。
+    ///
+    /// `channel_epoch` 必须填**当前**值：服务器在分流到 Probe 分支之前就做了 epoch 检查，
+    /// 填 0 的包会被一律判「过期」丢掉，而且丢得悄无声息（打点没有回音，看起来像网络不通）。
+    /// 这是 P5 联调时被端到端测试抓出来的（原来这里硬编码 0）。
     pub fn encode_probe(&mut self, ts_us: u64, out: &mut [u8]) -> Result<usize, CryptoError> {
         let seq = self.take_seq();
         let header = VoiceHeader {
             flags: flags::PROBE,
             red_len: 0,
-            channel_epoch: 0,
+            channel_epoch: self.channel_epoch(),
             sender_id: self.sender_id,
             seq,
             timestamp: 0,

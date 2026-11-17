@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{NOW, join, join_channel, send_control, sent_messages, server};
+use common::{NOW, connect, join, join_channel, send_control, sent_messages, server};
 use protocol::control::proto as pb;
 use protocol::control::proto::control_message::Kind;
 use server_core::{Action, Server, ServerConfig};
@@ -63,6 +63,38 @@ fn handshake_returns_server_hello_then_auth_result_then_channel_sync() {
     assert!(result.ok);
     assert_eq!(result.user_id, 1);
     assert!(s.session(id).unwrap().is_ready());
+}
+
+#[test]
+fn identity_comes_from_the_user_table_not_the_connection_order() {
+    // bob 在用户表里是 id 2，但这里让他**先**连上来。若拿会话序号当身份，
+    // 他会变成 user 1 —— 成员表里「名字与 id 对不上」，而客户端是按
+    // `AuthResult.user_id` 在成员表里找自己的，于是会找到别人。
+    // 真实症状：客户端日志「我在频道 0」然后一直等不到频道快照（10 秒超时）。
+    let mut s = server();
+    s.add_channel(0, "大厅");
+    let bob = connect(&mut s, "bob", "bob-pw", 2);
+    let alice = connect(&mut s, "alice", "alice-pw", 1);
+
+    assert_eq!(
+        s.session(bob.id).unwrap().user_id,
+        2,
+        "bob 的身份必须来自用户表，而不是「他第几个连上来」"
+    );
+    assert_eq!(s.session(alice.id).unwrap().user_id, 1);
+
+    // 线格式上也要对：进频道时服务器推的 `UserJoined` 里，id 与名字必须自洽。
+    let channel = *s.channels().keys().next().expect("有频道");
+    let actions = join_channel(&mut s, alice.id, channel);
+    let joined = sent_messages(&actions)
+        .into_iter()
+        .find_map(|(to, msg)| match &msg.kind {
+            Some(Kind::UserJoined(joined)) if to == alice.id => joined.user.clone(),
+            _ => None,
+        })
+        .expect("alice 进频道后应当收到自己的 UserJoined");
+    assert_eq!(joined.user_id, 1);
+    assert_eq!(joined.name, "alice");
 }
 
 #[test]

@@ -514,6 +514,51 @@ fn choose_config(
     Ok((chosen.config(), chosen.sample_format()))
 }
 
+/// 一个设备接受的采样率区间（含两端）。
+///
+/// 为什么需要它：客户端链路固定 48 kHz（Opus 帧长 10 ms = 480 样本），设备不给 48 kHz 时
+/// 只能换设备或加一次重采样。让用户在**动手之前**就能看出哪个设备能用，比事后报一句
+/// 「设备配置不可用」有用得多。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateRange {
+    /// 下限（Hz）。
+    pub min: u32,
+    /// 上限（Hz）。
+    pub max: u32,
+}
+
+impl RateRange {
+    /// 这个区间是否覆盖 `rate`。
+    #[must_use]
+    pub fn covers(&self, rate: u32) -> bool {
+        self.min <= rate && rate <= self.max
+    }
+}
+
+/// 列出设备接受的采样率区间。
+pub fn rate_ranges(device_name: Option<&str>, input: bool) -> Result<Vec<RateRange>, AudioIoError> {
+    let host = cpal::default_host();
+    let device = find_device(&host, device_name, input)?;
+    let ranges: Vec<cpal::SupportedStreamConfigRange> = if input {
+        device
+            .supported_input_configs()
+            .map_err(|e| AudioIoError::Config(e.to_string()))?
+            .collect()
+    } else {
+        device
+            .supported_output_configs()
+            .map_err(|e| AudioIoError::Config(e.to_string()))?
+            .collect()
+    };
+    Ok(ranges
+        .into_iter()
+        .map(|range| RateRange {
+            min: range.min_sample_rate(),
+            max: range.max_sample_rate(),
+        })
+        .collect())
+}
+
 fn apply_buffer(config: &mut cpal::StreamConfig, frames: Option<u32>) {
     if let Some(frames) = frames {
         config.buffer_size = cpal::BufferSize::Fixed(frames);
@@ -777,10 +822,51 @@ where
         .map_err(|e| AudioIoError::Stream(e.to_string()))
 }
 
+/// 播放侧的音源接缝。
+///
+/// 为什么要有它：环（[`rtrb::Consumer<f32>`]）不是唯一的音源。客户端的混音器
+/// （`audio_core::Mixer`）必须**跑在音频回调里** —— 把混音放到别的线程、再经一个环递给
+/// 回调，等于凭空多一层缓冲（10–20 ms 的额外延迟）。所以回调要能直接向「某个会自己
+/// 产生样本的东西」要样本，而不是只会 `pop` 一个环。
+///
+/// 实现纪律与回调本身一致：`next_sample` 内零分配、零锁、零日志。
+pub trait SampleSource: Send {
+    /// 取一个样本；`None` 表示这一刻没有数据（调用方补静音并计一次欠载）。
+    fn next_sample(&mut self) -> Option<f32>;
+}
+
+/// 环作为音源：与原来「`pop` 失败就补静音」的行为逐样本等价。
+impl SampleSource for rtrb::Consumer<f32> {
+    fn next_sample(&mut self) -> Option<f32> {
+        self.pop().ok()
+    }
+}
+
 /// 开始播放：从 `consumer` 取单声道 f32 铺到所有声道；取空就写静音并计数。
+///
+/// 只是 [`start_playout_source`] 的便捷版本（把环包成一个音源）。
 pub fn start_playout(
     device_name: Option<&str>,
     consumer: rtrb::Consumer<f32>,
+    events: Sender<StreamEvent>,
+    buffer_frames: Option<u32>,
+    stamps: Option<rtrb::Producer<CallbackStamp>>,
+    preferred_rate: u32,
+) -> Result<PlayoutHandle, AudioIoError> {
+    start_playout_source(
+        device_name,
+        Box::new(consumer),
+        events,
+        buffer_frames,
+        stamps,
+        preferred_rate,
+    )
+}
+
+/// 开始播放，音源由调用方提供（客户端的混音器走这条路）。
+pub fn start_playout_source(
+    device_name: Option<&str>,
+    source: Box<dyn SampleSource>,
     events: Sender<StreamEvent>,
     buffer_frames: Option<u32>,
     stamps: Option<rtrb::Producer<CallbackStamp>>,
@@ -805,7 +891,7 @@ pub fn start_playout(
             &device,
             config,
             CallbackContext {
-                ring: consumer,
+                ring: source,
                 stats: local,
                 events,
                 stamps,
@@ -817,7 +903,7 @@ pub fn start_playout(
             &device,
             config,
             CallbackContext {
-                ring: consumer,
+                ring: source,
                 stats: local,
                 events,
                 stamps,
@@ -829,7 +915,7 @@ pub fn start_playout(
             &device,
             config,
             CallbackContext {
-                ring: consumer,
+                ring: source,
                 stats: local,
                 events,
                 stamps,
@@ -841,7 +927,7 @@ pub fn start_playout(
             &device,
             config,
             CallbackContext {
-                ring: consumer,
+                ring: source,
                 stats: local,
                 events,
                 stamps,
@@ -853,7 +939,7 @@ pub fn start_playout(
             &device,
             config,
             CallbackContext {
-                ring: consumer,
+                ring: source,
                 stats: local,
                 events,
                 stamps,
@@ -865,7 +951,7 @@ pub fn start_playout(
             &device,
             config,
             CallbackContext {
-                ring: consumer,
+                ring: source,
                 stats: local,
                 events,
                 stamps,
@@ -893,7 +979,7 @@ pub fn start_playout(
 fn start_output<T, F>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    context: CallbackContext<rtrb::Consumer<f32>, PlayoutStats>,
+    context: CallbackContext<Box<dyn SampleSource>, PlayoutStats>,
     from_f32: F,
 ) -> Result<cpal::Stream, AudioIoError>
 where
@@ -907,7 +993,7 @@ where
         stamps,
         watchdog,
     } = context;
-    let mut consumer = ring;
+    let mut source = ring;
     let mut stamps = stamps;
     let channels = usize::from(config.channels).max(1);
     let error_stats = Arc::clone(&stats);
@@ -920,12 +1006,12 @@ where
                 let frames = (data.len() / channels) as u64;
                 let mut real_frames = 0_u64;
                 for frame in data.chunks_exact_mut(channels) {
-                    let sample = match consumer.pop() {
-                        Ok(value) => {
+                    let sample = match source.next_sample() {
+                        Some(value) => {
                             real_frames += 1;
                             value
                         }
-                        Err(_) => {
+                        None => {
                             stats.underrun_samples.fetch_add(1, Ordering::Relaxed);
                             0.0
                         }

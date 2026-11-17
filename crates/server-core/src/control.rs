@@ -257,6 +257,11 @@ impl Server {
                 });
                 if let Some(s) = self.session_mut(session_id) {
                     s.state = SessionState::Ready;
+                    // **身份来自用户表，不是连接顺序**。原来这里漏了 user_id，于是
+                    // 每个会话拿的是 `open_session` 时的自增序号：先连上来的那个人
+                    // 就变成 user 1，不管他是谁。表现是成员表里「名字与 id 对不上」，
+                    // 客户端按 `AuthResult.user_id` 找自己时找错人（于是「我在频道 0」）。
+                    s.user_id = outcome.user_id;
                     s.name = outcome.name;
                     s.perms = outcome.perms;
                 }

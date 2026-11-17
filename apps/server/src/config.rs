@@ -27,7 +27,10 @@ HushSquad 服务器\n\
   --hash-password <密码> 打印一条用户记录里要填的 argon2id PHC 串\n\
 \n\
 生成一个自签证书（一行）：\n\
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout key.pem -out cert.pem -days 365 -subj /CN=localhost\n";
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \\\n    -keyout key.pem -out cert.pem -days 365 -subj /CN=localhost \\\n    -addext \"subjectAltName=DNS:localhost,IP:127.0.0.1\"\n\
+\n\
+必须带 -addext（SAN）：客户端用 rustls 校验证书，它**只认 SAN、不认 CN**，\n\
+没有 SAN 的证书即使 --ca 给了也会被拒。要连别的地址就把那个 IP 也写进 SAN。\n";
 
 /// 配置。
 #[derive(Debug, Clone)]

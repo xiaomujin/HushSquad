@@ -106,7 +106,8 @@ pub struct Server {
     metrics: Metrics,
     next_session_id: u64,
     next_sender_id: u32,
-    next_user_id: u32,
+    // 注意：**没有** next_user_id。用户 id 来自用户表（认证结果），不是会话序号 ——
+    // 用会话序号当 user_id 会让「谁是谁」取决于连接顺序（见 on_auth 的注释）。
     next_channel_id: u32,
     /// 全局单调的成员快照版本，见模块注释第 2 条。
     next_epoch: u16,
@@ -149,7 +150,6 @@ impl Server {
             // 0 是「未分配」的哨兵值，从 1 开始发号。
             next_session_id: 1,
             next_sender_id: 1,
-            next_user_id: 1,
             next_channel_id: 1,
             next_epoch: 1,
             scratch: Vec::with_capacity(protocol::MAX_ON_WIRE),
@@ -300,13 +300,12 @@ impl Server {
         self.next_session_id += 1;
         let sender_id = self.next_sender_id;
         self.next_sender_id += 1;
-        let user_id = self.next_user_id;
-        self.next_user_id += 1;
 
         let keys = transport::VoiceKeys::zeroed();
         let session = Session {
             id,
-            user_id,
+            // 认证前没有身份；`on_auth` 成功后才写入用户表里的真实 id。
+            user_id: 0,
             sender_id,
             name: name.into(),
             voice_token,

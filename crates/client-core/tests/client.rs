@@ -269,6 +269,36 @@ fn silence_and_probe_are_recognised() {
 }
 
 #[test]
+fn a_probe_carries_the_current_channel_epoch() {
+    // 服务器在分流到 Probe 分支**之前**就做了 epoch 检查：填 0 的打点包会被判「过期」
+    // 静静丢掉（打点没有回音，看起来像网络不通）。这条测试把那个坑钉住。
+    let mut c = ready_client();
+    c.on_message(envelope(Kind::ChannelSync(pb::ChannelSync {
+        channels: vec![pb::ChannelState {
+            channel_id: 1,
+            name: "大厅".to_owned(),
+            channel_epoch: 5,
+            ..Default::default()
+        }],
+        users: vec![pb::UserState {
+            user_id: 1,
+            sender_id: 42,
+            name: "me".to_owned(),
+            channel_id: 1,
+            ..Default::default()
+        }],
+        self_channel_id: 1,
+    })));
+    assert_eq!(c.channel_epoch(), 5, "前提：已经在 epoch 5 的频道里");
+
+    let mut buf = vec![0u8; 64];
+    let n = c.encode_probe(0x1234, &mut buf).expect("加密打点包");
+    let header = VoiceHeader::parse(&buf[..n]).expect("解析头");
+    assert_eq!(header.channel_epoch, 5, "打点包必须带当前 epoch");
+    assert_eq!(header.flags, flags::PROBE);
+}
+
+#[test]
 fn the_roster_follows_the_server() {
     let mut c = ready_client();
     c.on_message(envelope(Kind::ChannelSync(pb::ChannelSync {
