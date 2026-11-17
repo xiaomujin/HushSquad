@@ -7,6 +7,8 @@
 
 #![allow(clippy::print_stdout)]
 
+mod exclusive;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,6 +28,7 @@ const USAGE: &str = "\
   loopback [--input <名字>] [--output <名字>] [--seconds 10] [--ring-ms 10]\n\
            [--codec none|opus:10ms:32k] [--report out/loopback.json]\n\
   loopback --impulse [--period-ms 500] [--seconds 10] [--report out/impulse.json]\n\
+  loopback --impulse --exclusive [--buffer 480] [--report out/exclusive.json]\n\
 \n\
 说明：\n\
   --ring-ms   播放/采集环形缓冲长度，直接进环回延迟，默认 50 ms\n\
@@ -34,6 +37,7 @@ const USAGE: &str = "\
   --single    只发一个脉冲（在 0.5 s 处）：没有周期歧义，结果唯一，推荐先用它\n\
   --repeat    连测 N 次并给出中位数与极差（默认 1）；重复性比单次读数更能说明问题\n\
   --dump      把录音写成 WAV（排查「两个峰」这类问题时唯一能定案的手段）\n\
+  --exclusive 播放改走 WASAPI 独占模式：绕过音频引擎与 APO（本机实测 5 个），只支持默认播放端点\n\
   --impulse   播放已知脉冲串并用麦克风录回，匹配滤波求环回延迟（外放时才有声学路径）\n";
 
 /// 一次会话的统计。
@@ -95,6 +99,12 @@ struct FormatReport {
     channels: u16,
     /// 请求的设备缓冲（帧）；`null` 表示用设备默认。
     requested_buffer_frames: Option<u32>,
+    /// 设备实际缓冲（帧）。
+    ///
+    /// 共享模式下 WASAPI 只把请求值当建议（实测给 128 帧，回调周期照样是设备周期），
+    /// 独占模式下它就是真值，所以只有独占模式才写这个字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual_buffer_frames: Option<u32>,
     /// 设备实际采样格式。
     sample_format: String,
 }
@@ -105,7 +115,46 @@ impl From<StreamFormat> for FormatReport {
             sample_rate: value.sample_rate,
             channels: value.channels,
             requested_buffer_frames: value.requested_buffer_frames,
+            actual_buffer_frames: None,
             sample_format: format!("{:?}", value.sample_format),
+        }
+    }
+}
+
+/// 播放侧的两种实现：cpal 共享模式（默认）与 WASAPI 独占模式（`--exclusive`）。
+///
+/// 用枚举而不是 `trait`：只有两处调用点，动态分派在这里没有任何好处，
+/// 而枚举强迫每个分支都被编译器检查一遍（新加一个后端不会漏改）。
+enum Playout {
+    Shared(audio_io::PlayoutHandle),
+    Exclusive(exclusive::ExclusiveRender),
+}
+
+impl Playout {
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Shared(handle) => handle.format.sample_rate,
+            Self::Exclusive(render) => render.format.sample_rate,
+        }
+    }
+
+    fn format_report(&self) -> FormatReport {
+        match self {
+            Self::Shared(handle) => FormatReport::from(handle.format),
+            Self::Exclusive(render) => FormatReport {
+                sample_rate: render.format.sample_rate,
+                channels: render.format.channels,
+                requested_buffer_frames: None,
+                actual_buffer_frames: Some(render.format.buffer_frames),
+                sample_format: format!("{} (独占)", render.format.sample_format),
+            },
+        }
+    }
+
+    fn stats(&self) -> &audio_io::PlayoutStats {
+        match self {
+            Self::Shared(handle) => &handle.stats,
+            Self::Exclusive(render) => &render.stats,
         }
     }
 }
@@ -124,6 +173,9 @@ struct Args {
     ring_ms: f64,
     buffer: Option<u32>,
     impulse: bool,
+    exclusive: bool,
+    /// 仅诊断用：把独占渲染强行开到指定采样率（与采集不一致时延迟读数作废）。
+    exclusive_rate: Option<u32>,
     single: bool,
     repeat: usize,
     period_ms: f64,
@@ -142,6 +194,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         ring_ms: 50.0,
         buffer: None,
         impulse: false,
+        exclusive: false,
+        exclusive_rate: None,
         single: false,
         repeat: 1,
         period_ms: 500.0,
@@ -183,6 +237,14 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .map_err(|e| format!("--amplitude 不是数字：{e}"))?;
             }
             "--impulse" => parsed.impulse = true,
+            "--exclusive" => parsed.exclusive = true,
+            "--exclusive-rate" => {
+                parsed.exclusive_rate = Some(
+                    take(args, &mut i, "--exclusive-rate")?
+                        .parse()
+                        .map_err(|e| format!("--exclusive-rate 不是整数：{e}"))?,
+                );
+            }
             "--single" => parsed.single = true,
             "--repeat" => {
                 parsed.repeat = take(args, &mut i, "--repeat")?
@@ -492,21 +554,59 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         Some(stamp_in_tx),
     )
     .map_err(|e| e.to_string())?;
-    let playout = audio_io::start_playout(
-        args.output.as_deref(),
-        playout_consumer,
-        tx,
-        args.buffer,
-        Some(stamp_out_tx),
-    )
-    .map_err(|e| e.to_string())?;
-
     let sample_rate = capture.format.sample_rate;
-    if playout.format.sample_rate != sample_rate {
-        return Err(format!(
-            "采集与播放采样率不一致（{} / {} Hz），先换同一设备族再测",
-            sample_rate, playout.format.sample_rate
-        ));
+    // 诊断开关：独占渲染强行用另一个采样率，只为判断「设备到底在不在消费」。
+    let render_rate = args.exclusive_rate.unwrap_or(sample_rate);
+    let rate_mismatch = args.exclusive && render_rate != sample_rate;
+    let playout = if args.exclusive {
+        Playout::Exclusive(exclusive::start(
+            playout_consumer,
+            stamp_out_tx,
+            tx,
+            render_rate,
+            args.buffer,
+            args.output.clone(),
+        )?)
+    } else {
+        Playout::Shared(
+            audio_io::start_playout(
+                args.output.as_deref(),
+                playout_consumer,
+                tx,
+                args.buffer,
+                Some(stamp_out_tx),
+            )
+            .map_err(|e| e.to_string())?,
+        )
+    };
+
+    if playout.sample_rate() != sample_rate {
+        if !rate_mismatch {
+            return Err(format!(
+                "采集与播放采样率不一致（{} / {} Hz），先换同一设备族再测",
+                sample_rate,
+                playout.sample_rate()
+            ));
+        }
+        eprintln!(
+            "⚠ 诊断模式：渲染 {} Hz 与采集 {} Hz 不一致，延迟读数作废，只看「已填缓冲」有没有增长",
+            playout.sample_rate(),
+            sample_rate
+        );
+    }
+
+    if let Playout::Exclusive(render) = &playout {
+        println!(
+            "独占模式：{} 声道 {} Hz {}，缓冲 {} 帧（{:.2} ms），设备周期 {} 帧，GetStreamLatency {:.2} ms",
+            render.format.channels,
+            render.format.sample_rate,
+            render.format.sample_format,
+            render.format.buffer_frames,
+            f64::from(render.format.buffer_frames) * 1000.0 / f64::from(sample_rate),
+            render.format.period_frames,
+            render.format.stream_latency_ms,
+        );
+        println!("  格式协商：{}", render.format.negotiation);
     }
 
     let total = (args.seconds.max(0.1) * f64::from(sample_rate)) as usize;
@@ -537,6 +637,31 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         ring_samples,
     );
     stop.store(true, Ordering::Relaxed);
+
+    // 填充次数放在这里看才有意义：开流瞬间还是 0，跑完才知道渲染线程到底有没有被喂动。
+    if let Playout::Exclusive(render) = &playout {
+        let fills = render.fills.load(Ordering::Relaxed);
+        println!(
+            "  已填缓冲 {fills} 次（{} 帧一次，约 {:.2} ms 音频）",
+            render.format.buffer_frames,
+            (fills * u64::from(render.format.buffer_frames)) as f64 * 1000.0
+                / f64::from(render.format.sample_rate)
+        );
+        // 一次都没填 = 设备根本没消费。此时再往下算延迟只会得到一个假的「没测到脉冲」，
+        // 必须把真正的原因喊出来，否则下一次还会有人以为是自己麦克风没开。
+        if fills == 0 {
+            return Err(format!(
+                "独占流建起来了但设备一次都没消费：{} 声道 {} Hz {}、{} 帧缓冲，Start 返回成功，但设备时钟 position 恒为 0、padding 恒等于缓冲大小。\n同机对照：无 APO 的端点（TOPPING USB DAC）独占正常（6 ms 缓冲、2 秒内填充 313 次）；挂 APO 的端点（扬声器 与 Realtek Digital Output，各 5 个 APO：RltkAPOU64 + dtsapo3core64）全部如此。\n结论：这条端点上的 APO 链让 WASAPI 独占模式静默失效。换端点，或关掉该端点的音效增强后重试",
+                render.format.channels,
+                render.format.sample_rate,
+                render.format.sample_format,
+                render.format.buffer_frames
+            ));
+        }
+    }
+    if rate_mismatch {
+        return Err("诊断模式结束：渲染与采集采样率不一致，不产出延迟读数".to_owned());
+    }
 
     // 抽出两边的时间戳（回调里只写，不读，避免任何阻塞）。
     let mut out_stamps: Vec<audio_io::CallbackStamp> = Vec::new();
@@ -588,15 +713,15 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         input: args.input.clone(),
         output: args.output.clone(),
         capture_format: Some(capture.format.into()),
-        playout_format: Some(playout.format.into()),
+        playout_format: Some(playout.format_report()),
         ring_samples,
         seconds: args.seconds,
         capture_dropped_samples: capture.stats.dropped_samples.load(Ordering::Relaxed),
-        playout_underrun_samples: playout.stats.underrun_samples.load(Ordering::Relaxed),
+        playout_underrun_samples: playout.stats().underrun_samples.load(Ordering::Relaxed),
         stream_errors: capture.stats.fatal_errors.load(Ordering::Relaxed)
-            + playout.stats.fatal_errors.load(Ordering::Relaxed),
+            + playout.stats().fatal_errors.load(Ordering::Relaxed),
         xrun_events: capture.stats.xrun_events.load(Ordering::Relaxed)
-            + playout.stats.xrun_events.load(Ordering::Relaxed),
+            + playout.stats().xrun_events.load(Ordering::Relaxed),
         restarts: 0,
         // 主值走时间戳：不含我们自己的环形缓冲占用，也不含流启动错位。
         delay_ms: stamp_delay,
@@ -616,7 +741,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         opus_frames: None,
     };
 
-    let underruns = playout.stats.underrun_samples.load(Ordering::Relaxed);
+    let underruns = playout.stats().underrun_samples.load(Ordering::Relaxed);
     drop(capture);
     drop(playout);
 
@@ -629,8 +754,10 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
 
     // 时间戳自检：`stream_nanos` 是设备承诺的时刻，`wall_nanos` 是回调真正跑起来的时刻。
     // 两者之差就是「这一批样本离真正播放/采集还有多久」，也就是设备缓冲深度。
-    let out_offset = median_offset(&out_stamps);
-    let in_offset = median_offset(&in_stamps);
+    // QPC 与 crate 内 Instant 纪元不同源，不先对齐就会印出 +3900356 ms 这种读不出的数。
+    let epoch_ns = exclusive::qpc_epoch_offset_ns().unwrap_or(0);
+    let out_offset = median_offset(&out_stamps, epoch_ns);
+    let in_offset = median_offset(&in_stamps, epoch_ns);
     println!(
         "时间戳：输出 {} 条（playback−回调 {:+.1} ms），输入 {} 条（capture−回调 {:+.1} ms）",
         out_stamps.len(),
@@ -640,7 +767,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     );
 
     if let Some(estimate) = estimate {
-        print_stamp_pair(&estimate, &out_stamps, &in_stamps);
+        print_stamp_pair(&estimate, &out_stamps, &in_stamps, epoch_ns);
     }
     if let Some((_, t_play, t_capture)) = stamp_result {
         let base = out_stamps
@@ -863,6 +990,7 @@ fn print_stamp_pair(
     estimate: &audio_io::impulse::DelayEstimate,
     out_stamps: &[audio_io::CallbackStamp],
     in_stamps: &[audio_io::CallbackStamp],
+    epoch_ns: i128,
 ) {
     let describe = |label: &str, stamp: Option<&audio_io::CallbackStamp>| match stamp {
         Some(stamp) => println!(
@@ -870,7 +998,8 @@ fn print_stamp_pair(
             stamp.first_index,
             stamp.frames,
             stamp.real_frames,
-            (stamp.stream_nanos as f64 - stamp.wall_nanos as f64) / 1_000_000.0
+            (i128::from(stamp.stream_nanos) - epoch_ns - i128::from(stamp.wall_nanos)) as f64
+                / 1_000_000.0
         ),
         None => println!(
             "  {label} stamp：没找到（索引 {}）",
@@ -895,13 +1024,16 @@ fn print_stamp_pair(
 ///
 /// 输出侧是「还要等多久才真正播放」，输入侧是「这批样本是多久以前采到的」（负值）。
 /// 两者相加就是设备缓冲总量；用它把「端到端延迟」拆成「设备缓冲」与「声学/驱动」两部分。
-fn median_offset(stamps: &[audio_io::CallbackStamp]) -> f64 {
+fn median_offset(stamps: &[audio_io::CallbackStamp], epoch_ns: i128) -> f64 {
     if stamps.is_empty() {
         return f64::NAN;
     }
     let mut offsets: Vec<f64> = stamps
         .iter()
-        .map(|stamp| (stamp.stream_nanos as f64 - stamp.wall_nanos as f64) / 1_000_000.0)
+        .map(|stamp| {
+            (i128::from(stamp.stream_nanos) - epoch_ns - i128::from(stamp.wall_nanos)) as f64
+                / 1_000_000.0
+        })
         .collect();
     offsets.sort_by(f64::total_cmp);
     offsets[offsets.len() / 2]

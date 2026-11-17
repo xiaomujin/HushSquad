@@ -227,7 +227,10 @@ impl CallbackStamp {
 static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 /// 自纪元起的纳秒数（单调，不受系统时间调整影响）。
-fn wall_nanos() -> u64 {
+///
+/// 公开是因为 `CallbackStamp::wall_nanos` 必须落在同一个纪元上才可比：
+/// 其它后端（如 `apps/loopback` 里的 WASAPI 独占渲染器）自己开流时要用同一根时间轴。
+pub fn wall_nanos() -> u64 {
     let epoch = EPOCH.get_or_init(std::time::Instant::now);
     u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }

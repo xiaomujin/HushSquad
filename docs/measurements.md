@@ -38,6 +38,37 @@
 > 只有「默认设备」这一对可用：Realtek 内置扬声器 → USB 电容麦。
 > 换 TOPPING DAC 或 Realtek Digital Output 时录音里没有脉冲（不是静音，是根本没人放声）。
 
+### 1.2 WASAPI 独占模式（P2-6，`apps/loopback --impulse --exclusive`）
+
+动机：§1.1 把 198 ms 定位到播放侧。查注册表确认默认端点的 APO 链是 Realtek `RltkAPOU64`
+（SFX/MFX/EFX 各一个）串 DTS APO3 `dtsapo3core64`（MFX/EFX 各一个），**共 5 个 APO**，
+`DTSAPO3Service` 在跑。独占模式按定义不经过音频引擎与 APO，且不需要管理员权限
+（改注册表关「音频增强」要提权）。
+
+cpal 的公开 API 只有共享模式，所以直接对 `windows` crate 写 `IAudioClient`。三个卡点：
+
+| 卡点 | 现象 | 结论 |
+|---|---|---|
+| 缓冲时长 | 传 0 或任意值 → `AUDCLNT_E_BUFFER_SIZE_ERROR`（0x88890016） | 必须是设备周期的整数倍 |
+| `hnsPeriodicity` | `0` 在 3–96 ms 全档被拒（0x88890016）；取「一个周期」而缓冲两周期 → `AUDCLNT_E_BUFDURATION_PERIOD_NOT_EQUAL`（0x88890013） | **本驱动只接受 `periodicity == bufferDuration`** |
+| 启动前预填 | 不预填时 `GetCurrentPadding` 恒等于缓冲大小、`available` 恒为 0，事件照来却一次都填不进去 | 必须先 `GetBuffer(整块)` → 填静音 → `ReleaseBuffer`，再 `Start()`（MSDN 的做法）；**且不能先查 padding**——`Start` 之前它会报错，一旦兜底成「满」就永远预填不进去 |
+
+结果——**同一台机器、同一份代码，只换端点**：
+
+| 端点 | FxProperties 值数 / APO | 独占流 | 实测 |
+|---|---:|---|---|
+| `扬声器 (Realtek(R) Audio)`（默认） | 153 / 5 个 APO | 建起来了，**不跑** | `Initialize` OK、`Start` OK，但 `IAudioClock::GetPosition` 恒为 0、`padding` 恒等于缓冲大小，2 s 内填充 **0** 次 |
+| `Realtek Digital Output` | 149 / 同族 APO | 建起来了，**不跑** | 同上，填充 0 次 |
+| `扬声器 (TOPPING USB DAC)` | 0 / 无 APO | **正常** | i16、288 帧（6.00 ms）缓冲、周期 144 帧、`GetStreamLatency` 6.00 ms；2 s 内填充 **313** 次（≈1878 ms 音频） |
+
+结论：**这条端点上的 APO 链让 WASAPI 独占模式静默失效**——API 全程返回成功，硬件却不走。
+不是用法问题（同机无 APO 端点用同一份代码正常），也不是采样率问题（48 kHz 与 192 kHz 都试过，
+192 kHz 同样不跑）。工具现在遇到这种情况会直接报出上面这段对照，而不是退化成一句「没测到脉冲」。
+
+> 因此 **D1 在本机默认输出上既拿不到也压不下来**：共享模式 198.3 ms（APO 链），独占模式根本跑不起来。
+> 要在本机拿到可签字的 D1，只有四条路：关掉该端点的音效增强（需管理员）、卸载 DTS APO3、
+> 把 TOPPING DAC 的线路输出物理接到麦克风输入，或换一台没有 APO 的机器。
+
 ## 2. CPU / 每 10 ms 帧耗时（单位 ms）
 
 | 日期 | 阶段 | 配置 | 环节 | n | p50 | p95 | 备注 |
@@ -67,4 +98,7 @@
 | C-03 | 热路径零分配可被机器验证（`allocations_in_hot_path == 0`），不靠人工评审 | `testkit run` 报告、`crates/testkit/tests/pipeline.rs` | — |
 | C-04 | 环回延迟估计器必须用**能量加权**匹配滤波，且脉冲波形必须**零均值**：归一化相关对幅度不敏感，录音里 300–400 Hz 的低频漂移（比脉冲低 30 dB）能让静音区的相关度饱和到 0.72–0.98，把底噪判成「4 ms 的延迟」——这正是 P2 早期 ±8 ms 抖动的真因 | §1.1、`crates/audio-io/src/impulse.rs` 的 `drift_alone_is_rejected` / `low_frequency_drift_does_not_fake_a_click` | — |
 | C-05 | 默认共享模式下环回延迟 **198.3 ms**，且与 `--buffer` 无关（128 与 480 差 0.16 ms）、与自有环形缓冲无关（`--ring-ms 400` 同值）。**D1（≤15 ms p95）在本机默认设备上不达标**，瓶颈在设备/音效链而不是 cpal 的缓冲 | §1.1 前四行 | — |
-| C-06 | 198 ms 全部落在**播放侧**：采集侧是实时的（录音下标 ÷ 采样率 = 采集回调时刻，差 <2 ms）；而 WASAPI 自己只报 43 ms，其余 ~155 ms 对 `IAudioClock` 不可见——与「笔记本 Dolby/Nahimic 类 APO 延迟」的特征一致 | §1.1 最后一行 | — |
+| C-06 | 198 ms 全部落在**播放侧**：采集侧是实时的（录音下标 ÷ 采样率 = 采集回调时刻，差 <2 ms；对齐纪元后 `capture − 回调` 实测 −10.3 ms，正好是一个 480 帧缓冲）；而 WASAPI 自己只报 43 ms，其余 ~155 ms 对 `IAudioClock` 不可见 | §1.1 最后一行、§1.2 | — |
+| C-07 | 默认端点上的 APO 链是 **5 个 APO**：Realtek `RltkAPOU64`（SFX/MFX/EFX 各一）串 DTS APO3 `dtsapo3core64`（MFX/EFX 各一），`DTSAPO3Service` 在跑；端点 FxProperties 有 153 个值（无 APO 的端点只有 0–7 个）。这就是 C-06 里那 ~155 ms 的来源 | §1.2、注册表 `MMDevices\Audio\Render\{86fa0ab0-…}\FxProperties` | — |
+| C-08 | **APO 链让 WASAPI 独占模式静默失效**：`Initialize`/`Start` 全部返回成功，但 `IAudioClock::GetPosition` 恒为 0、`padding` 恒等于缓冲大小。同机对照——挂 APO 的两条端点（扬声器、Realtek Digital Output）填充 0 次，无 APO 的 TOPPING USB DAC 用同一份代码 2 s 内填充 313 次（6.00 ms 缓冲）。因果成立，不是用法问题，也不是采样率问题 | §1.2 | — |
+| C-09 | 独占模式在本机可用的最小缓冲是 **288 帧 / 6.00 ms**（`GetStreamLatency` 同为 6.00 ms）。这条路径本身够 D1（≤15 ms p95）用，但只能在无 APO 的端点上跑；默认扬声器上拿不到数 | §1.2 最后一行 | — |

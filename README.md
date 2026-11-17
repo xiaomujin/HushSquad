@@ -10,7 +10,7 @@
 **P0 完成**：工作区骨架、依赖纪律、门禁脚本已落地（门禁全绿）。
 **P1 完成**：离线直通链路 + 测量工具已落地——`testkit run` 能出 encode/decode 的 p50/p95/max，热路径分配数由机器验证为 0。
 
-**P2 进行中**：`audio-io` 与 `loopback` 已落地，物理环回延迟测出真值——**本机默认设备 198.3 ms，D1 预算 ≤15 ms，不达标**，根因在输出设备的音效链（APO）而非我们的代码。下一步做 WASAPI 独占模式绕过它。
+**P2 进行中**：`audio-io` 与 `loopback` 已落地，物理环回延迟测出真值——**本机默认设备 198.3 ms，D1 预算 ≤15 ms，不达标**。根因已定位并证实：默认输出端点上挂了 5 个 APO（Realtek `RltkAPOU64` + DTS APO3 `dtsapo3core64`）。WASAPI 独占模式（本应绕过整条 APO 链）已实现，但在这些挂 APO 的端点上**静默失效**——API 全程返回成功、硬件却不走；同一份代码在无 APO 的 TOPPING USB DAC 上正常（6.00 ms 缓冲）。还缺一条「能跑独占又有声学回路」的路径才能给出可签字的 D1。
 
 | 阶段 | 状态 |
 |---|---|
@@ -124,6 +124,17 @@ cargo run -p loopback --release -- --impulse --single --seconds 3 --repeat 5 \
 
 > 本机实测：默认设备环回延迟 **198.3 ms**（n=5，极差 0.39 ms），D1 预算 ≤15 ms → **不达标**；
 > 瓶颈在输出设备的音效链（WASAPI 自己只承认 43 ms），见 `docs/measurements.md` §1.1 与结论 C-05/C-06。
+
+`--exclusive` 让播放改走 **WASAPI 独占模式**（绕过音频引擎与 APO，不需要管理员权限）：
+
+```powershell
+cargo run -p loopback --release -- --impulse --single --seconds 3 --repeat 5 --exclusive
+```
+
+它会先问设备周期，再按「格式 × 缓冲时长 × 周期性 × 事件驱动」的矩阵试出设备真正接受的组合
+（本机驱动只接受 `periodicity == bufferDuration`，且缓冲必须是周期的整数倍）。
+若流建起来了但设备一次都没消费，工具会直接报出原因并附同机对照，而不是含糊地说「没测到脉冲」。
+`--exclusive-rate <hz>` 仅供诊断（强行让渲染与采集采样率不同，此时不产出延迟读数）。
 ## 明确不做
 
 浏览器 Web 端、视频、MCU 服务端混音（v1）、P2P/NAT 打洞（v1）、完整 WebRTC ICE/SDP、Mumble 客户端互通。
