@@ -388,6 +388,14 @@ pub fn run_case(
     let (mut tx, mut path, mut out) =
         ReceivePath::new(SENDER, 64, 8).map_err(|e| format!("构造接收路径失败：{e}"))?;
     path.set_delay_limits(0, TARGET_DELAY_MS);
+    // **关掉漂移补偿**：这个实验量的是 PLC 与冗余的价格/收益，不注入时钟漂移，补偿器只会
+    // 变成噪声源。而且这里是「先把包全塞进去、再猛拉」的离线跑法，`packets_queued` 会一直是
+    // 几十个包，补偿器会以为缓冲深得离谱、满速丢样本——实测把 0 % 丢包的 SNRseg 从 35 dB
+    // 拉到 14.84 dB（对齐偏了 1777 个样本）。
+    path.set_drift_config(audio_core::DriftConfig {
+        enabled: false,
+        ..audio_core::DriftConfig::default()
+    });
     let mut net = NetSim::new(NetSimConfig {
         loss,
         jitter_ms: 0,

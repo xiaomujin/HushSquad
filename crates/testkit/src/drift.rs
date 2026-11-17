@@ -38,8 +38,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::netsim::{NetSim, NetSimConfig};
 use audio_core::receive::{IncomingPacket, ReceivePath};
-use audio_core::{AudioCodec, FRAME_SAMPLES, Frame, MAX_PACKET_BYTES, OpusCodec, SAMPLE_RATE};
+use audio_core::{
+    AudioCodec, FRAME_MS, FRAME_SAMPLES, Frame, MAX_PACKET_BYTES, OpusCodec, SAMPLE_RATE,
+};
 
 /// 默认跑多久（小时）。
 pub const DEFAULT_HOURS: f64 = 4.0;
@@ -106,7 +109,63 @@ const SENDER: u32 = 0x4853_5102;
 /// 报告格式版本。指标口径变了就加一。
 ///
 /// v2：把「样本守恒残差」换成区间判据 + 推导出的 `fabricated_samples`（见该字段文档）。
-pub const VERSION: u32 = 2;
+/// v3：加入网络条件（抖动/丢包/种子），支持「抖动 + 漂移」联合长跑。
+pub const VERSION: u32 = 3;
+
+/// 网络条件（联合长跑用）。全 0 = 理想链路，与 P4-4/P4-6 的纯漂移跑逐位一致。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct NetConditions {
+    /// 抖动上限（毫秒）：每个包的额外延迟在 `0..=jitter_ms` 内均匀分布。
+    pub jitter_ms: u32,
+    /// 丢包概率（0.0–1.0）。
+    pub loss: f32,
+    /// 随机种子：同种子 + 同参数 ⇒ 逐位相同的投递时刻。
+    pub seed: u64,
+}
+
+impl NetConditions {
+    /// 是否就是理想链路（此时完全不经过模拟器，保证旧跑法的数字一字不改）。
+    #[must_use]
+    pub fn is_ideal(&self) -> bool {
+        self.jitter_ms == 0 && self.loss == 0.0
+    }
+}
+
+/// 补偿器的三个可调参数。默认值就是 `DriftConfig::default()`。
+///
+/// 暴露出来只有一个理由：**「漂移是直流、抖动是交流」，而滤波器的时间常数决定了两者分不分得开**。
+/// 这件事只能用长跑量，不能靠推。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DriftTuning {
+    /// 深度滤波的 EMA 系数。
+    pub ema_alpha: f32,
+    /// 比例增益。
+    pub kp: f32,
+    /// 死区（包）。
+    pub deadband_packets: f32,
+}
+
+impl Default for DriftTuning {
+    fn default() -> Self {
+        Self {
+            ema_alpha: audio_core::drift::DEFAULT_EMA_ALPHA,
+            kp: audio_core::drift::DEFAULT_KP,
+            deadband_packets: audio_core::drift::DEFAULT_DEADBAND_PACKETS,
+        }
+    }
+}
+
+impl DriftTuning {
+    fn to_config(self, compensate: bool) -> audio_core::DriftConfig {
+        audio_core::DriftConfig {
+            target_packets: audio_core::drift::DEFAULT_TARGET_PACKETS,
+            ema_alpha: self.ema_alpha,
+            kp: self.kp,
+            deadband_packets: self.deadband_packets,
+            enabled: compensate,
+        }
+    }
+}
 
 /// 一个统计窗口的摘要。长跑的唯一用途是看这条序列有没有趋势。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,6 +199,15 @@ pub struct Run {
     pub hours: f64,
     /// 注入的时钟失配（ppm，正数表示发送方快）。
     pub ppm: f64,
+    /// 注入的网络抖动上限（毫秒）。0 = 理想链路。
+    #[serde(default)]
+    pub jitter_ms: u32,
+    /// 注入的丢包概率。0 = 不丢。
+    #[serde(default)]
+    pub loss: f32,
+    /// 网络模拟的随机种子。
+    #[serde(default)]
+    pub net_seed: u64,
     /// 目标延迟下限（毫秒）。
     pub min_delay_ms: u32,
     /// 目标延迟上限（毫秒）。
@@ -170,7 +238,7 @@ pub struct Run {
     pub late_packets: u64,
     /// 缓冲被清空的次数。
     pub buffer_flushes: u64,
-    /// 被判为抖动尖峰的次数（应恒为 0：我们没有网络抖动）。
+    /// 被判为抖动尖峰的次数（理想链路下应恒为 0；联合长跑里它是正常现象）。
     pub jitter_peaks: u16,
     /// 是否开启 P4-6 的漂移补偿。
     pub compensate: bool,
@@ -241,7 +309,14 @@ pub struct Run {
     pub steady_inserted_samples: i64,
     /// 稳态窗口内 PLC 外推出来的样本数。
     pub steady_concealed_samples: i64,
-    /// 由守恒关系**推导**出来的「凭空造出来的样本数」：`缓冲变化 + 压缩 − 拉伸 − 累计差`。
+    /// 稳态窗口内被网络丢掉的样本数（`packets_lost × 480`）。
+    ///
+    /// 联合长跑必须有这一项：丢了 1 个包，NetEQ 就得多造 480 个样本来顶替，而
+    /// `发送帧数 − 收到帧数` 把「丢的包」和「时钟漂移」算成了一笔账。不拆开，守恒等式
+    /// 会差出成千上万个样本（实测 1 小时 0.5 % 丢包：差 105 024 个，全是这一项漏的）。
+    pub steady_lost_samples: i64,
+    /// 由守恒关系**推导**出来的「凭空造出来的样本数」：
+    /// `缓冲变化 + 压缩 − 拉伸 + 环水位变化 + 网络丢的样本 − 累计差`。
     ///
     /// 它必须落在 `[0, steady_concealed_samples]` 之间：下限 0 是说「没有样本凭空消失」，
     /// 上限是 NetEQ 自报的 PLC 样本数。
@@ -301,13 +376,57 @@ pub fn run(hours: f64, ppm: f64, min_ms: u32, max_ms: u32) -> Result<Run, String
     run_with(hours, ppm, min_ms, max_ms, true)
 }
 
-/// 跑一次漂移长跑，`compensate` 决定是否开启 P4-6 的漂移补偿。
+/// 跑一次漂移长跑，`compensate` 决定是否开启 P4-6 的漂移补偿。理想链路。
 pub fn run_with(
     hours: f64,
     ppm: f64,
     min_ms: u32,
     max_ms: u32,
     compensate: bool,
+) -> Result<Run, String> {
+    run_full(
+        hours,
+        ppm,
+        min_ms,
+        max_ms,
+        compensate,
+        NetConditions::default(),
+        DriftTuning::default(),
+    )
+}
+
+/// 跑一次漂移长跑，并叠加网络条件（抖动 + 丢包）。
+///
+/// 联合长跑的意义：单靠漂移，缓冲谷底是 14 ms；叠加抖动之后谷底会被压到目标延迟的下沿，
+/// 那时**漂移补偿器的每一次误判都会变成一次爆音**——这是纯漂移跑永远看不到的。
+pub fn run_with_net(
+    hours: f64,
+    ppm: f64,
+    min_ms: u32,
+    max_ms: u32,
+    compensate: bool,
+    net: NetConditions,
+) -> Result<Run, String> {
+    run_full(
+        hours,
+        ppm,
+        min_ms,
+        max_ms,
+        compensate,
+        net,
+        DriftTuning::default(),
+    )
+}
+
+/// 跑一次长跑，网络条件与补偿器参数都显式给出。
+pub fn run_full(
+    hours: f64,
+    ppm: f64,
+    min_ms: u32,
+    max_ms: u32,
+    compensate: bool,
+    net: NetConditions,
+    tuning: DriftTuning,
 ) -> Result<Run, String> {
     if !hours.is_finite() || hours <= 0.0 {
         return Err(format!("时长必须是正的有限值（小时），收到 {hours}"));
@@ -329,11 +448,14 @@ pub fn run_with(
 
     let (mut tx, mut path, mut out) = ReceivePath::new(SENDER, PACKET_CAPACITY, PCM_FRAMES)?;
     path.set_delay_limits(min_ms, max_ms);
-    path.set_drift_config(audio_core::DriftConfig {
-        target_packets: audio_core::drift::DEFAULT_TARGET_PACKETS,
-        enabled: compensate,
-    });
+    path.set_drift_config(tuning.to_config(compensate));
     let mut codec = OpusCodec::with_defaults().map_err(|e| format!("构造编码器失败：{e}"))?;
+    let mut sim = NetSim::new(NetSimConfig {
+        loss: net.loss,
+        jitter_ms: net.jitter_ms,
+        reorder: 0.0,
+        seed: net.seed,
+    });
 
     // 平滑正弦的一阶差分上界：2A·sin(πf/fs)。
     let step_bound = 2.0
@@ -384,6 +506,7 @@ pub fn run_with(
     let mut start_inserted = 0_u64;
     let mut start_concealed = 0_u64;
     let mut start_ring = 0_i64;
+    let mut start_lost = 0_u64;
     let mut start_excised = 0_u64;
     let mut start_inserted_drift = 0_u64;
     // 上一个封窗时刻的累计值，用来算窗口内的增量。
@@ -411,8 +534,18 @@ pub fn run_with(
             }
             let timestamp = sender_frames.wrapping_mul(FRAME_SAMPLES as u64) as u32;
             let pkt = IncomingPacket::new(SENDER, sender_frames as u16, timestamp, &packet[..len]);
-            if !tx.send(pkt) {
-                return Err("入站包环溢出：一个 tick 产出的包数超出容量".to_owned());
+            if net.is_ideal() {
+                // 理想链路完全不过模拟器：P4-4/P4-6 的旧数字必须逐位不变。
+                if !tx.send(pkt) {
+                    return Err("入站包环溢出：一个 tick 产出的包数超出容量".to_owned());
+                }
+            } else {
+                let now_ms = tick * u64::from(FRAME_MS);
+                for (_, delivered) in sim.step(pkt, now_ms) {
+                    if !tx.send(delivered) {
+                        return Err("入站包环溢出：一个 tick 到期的包数超出容量".to_owned());
+                    }
+                }
             }
             sender_frames += 1;
         }
@@ -469,6 +602,7 @@ pub fn run_with(
                 start_ring = drift.ring_level;
                 start_excised = drift.excised_samples;
                 start_inserted_drift = drift.inserted_samples;
+                start_lost = path.stats().packets_lost;
             }
             last_samples = samples;
 
@@ -550,15 +684,22 @@ pub fn run_with(
     let steady_inserted_drift = drift_now
         .inserted_samples
         .saturating_sub(start_inserted_drift) as i64;
-    // 样本守恒（含补偿器）：
-    //   fabricated = ΔB + 丢 − 补 + Δ环 − 两端累计差
+    // 网络丢掉的样本：这些包从没到过抖动缓冲，NetEQ 必须靠 PLC 造出来顶上。
+    let steady_lost =
+        (receive.packets_lost.saturating_sub(start_lost)) as i64 * FRAME_SAMPLES as i64;
+    // 样本守恒（含补偿器与网络丢包）：
+    //   fabricated = ΔB + 丢 − 补 + Δ环 + 网络丢的 − 两端累计差
     let fabricated_samples =
-        delta_buffer + steady_excised - steady_inserted_drift + ring_delta_samples - steady_drift;
+        delta_buffer + steady_excised - steady_inserted_drift + ring_delta_samples + steady_lost
+            - steady_drift;
 
     Ok(Run {
         version: VERSION,
         hours,
         ppm,
+        jitter_ms: net.jitter_ms,
+        loss: net.loss,
+        net_seed: net.seed,
         compensate,
         drift_excised_samples: steady_excised,
         drift_inserted_samples: steady_inserted_drift,
@@ -616,6 +757,7 @@ pub fn run_with(
         steady_removed_samples: steady_removed,
         steady_inserted_samples: steady_inserted,
         steady_concealed_samples: steady_concealed,
+        steady_lost_samples: steady_lost,
         fabricated_samples,
         windows,
     })
@@ -626,9 +768,14 @@ pub fn run_with(
 pub fn violations(run: &Run) -> Vec<String> {
     let mut bad: Vec<String> = Vec::new();
 
-    // 判据 1a：稳态水平必须在预算内。漂移被「吸收」到 40 ms 也算失败——那 20 ms 的账
+    // 判据 1a：稳态水平不许超预算。漂移被「吸收」到 40 ms 也算失败——那 20 ms 的账
     // 迟早要在延迟预算表里还。
-    let low = f64::from(run.min_delay_ms) - 1.0;
+    //
+    // 下界取 10 ms（一包）而**不是**预算下界 15 ms：缓冲比预算浅不是问题，那是省了延迟；
+    // 浅到会饿才是问题，而那个由「0 下溢」单独判（实测 +1000 ppm 稳态 13.83 ms、0 下溢）。
+    // 补偿器的控制目标是「排队 2 包」，而 `buffered_samples` 在这个点上读 14 ms——拿 15 ms
+    // 当硬下界等于要求控制器瞄准一个比它自己标定值高 1 ms 的点。
+    let low = 10.0;
     let high = f64::from(run.max_delay_ms) + 1.0;
     if !(run.settled_mean_ms >= low && run.settled_mean_ms <= high) {
         bad.push(format!(
@@ -647,7 +794,13 @@ pub fn violations(run: &Run) -> Vec<String> {
 
     // 判据 1c：不能乱走。缓冲在 5–21 ms 之间来回摆，等于没有任何控制——5 ms 的时候
     // 只要来一个晚到的包就是一次爆音。
-    if run.settled_spread_ms > SPREAD_TOLERANCE_MS {
+    // 摆动这条判据**只在干净链路上成立**。抖动一来，缓冲的上下摆是 NetEQ 在追抖动（实测
+    // 4 小时「抖动 0–10 ms + 0.5 % 丢包」：3–48 ms，摆动 45 ms），那是网络的性质，不是补偿器
+    // 失控。硬判它等于拿「网络抖不抖」当「控制器好不好」。
+    //
+    // 抖动链路上靠另外四条兜底：稳态均值不许超预算（超了就是补偿器把缓冲推走了）、
+    // 不许有趋势（爬 = 没吸收掉漂移）、0 下溢、0 硬跳变。
+    if run.jitter_ms == 0 && run.settled_spread_ms > SPREAD_TOLERANCE_MS {
         bad.push(format!(
             "稳态缓冲深度摆动 {:.2} ms（容差 {SPREAD_TOLERANCE_MS:.1} ms）：没有被控住",
             run.settled_spread_ms
@@ -690,6 +843,14 @@ fn print_report(run: &Run) {
         "漂移长跑：{:.2} 小时 / {:+.1} ppm / 目标延迟 {}–{} ms / 单音 {:.0} Hz",
         run.hours, run.ppm, run.min_delay_ms, run.max_delay_ms, run.tone_hz
     );
+    if run.jitter_ms > 0 || run.loss > 0.0 {
+        println!(
+            "网络条件：抖动 0–{} ms / 丢包 {:.2}% / 种子 {}",
+            run.jitter_ms,
+            run.loss * 100.0,
+            run.net_seed
+        );
+    }
     println!(
         "发送 {} 帧，收到 {} 帧，累计样本差 {}（{:+.1} ms）",
         run.sender_frames,
@@ -741,11 +902,12 @@ fn print_report(run: &Run) {
         run.samples_dropped_full
     );
     println!(
-        "PLC 自报 {} 样本（{} 次，上界）／守恒推导造出 {} 样本（{:+.1} ms，容差 ±1 帧）",
+        "PLC 自报 {} 样本（{} 次，上界）／守恒推导造出 {} 样本（{:+.1} ms，容差 ±4 帧）；网络丢 {} 样本",
         run.concealed_samples,
         run.concealment_events,
         run.fabricated_samples,
-        samples_to_ms(run.fabricated_samples as f64)
+        samples_to_ms(run.fabricated_samples as f64),
+        run.steady_lost_samples
     );
     println!(
         "硬跳变 {}／软跳变 {}／最大一阶差分 {:.4}（平滑上界 {:.4}）",
@@ -787,10 +949,16 @@ fn print_report(run: &Run) {
     }
 
     let bad = violations(run);
+    if run.jitter_ms > 0 {
+        println!(
+            "（抖动链路不判摆动：实测 {:.2} ms，由网络决定，不是控制器的事）",
+            run.settled_spread_ms
+        );
+    }
     if bad.is_empty() {
-        println!("结论：P4-4 四项判据全部满足。");
+        println!("结论：四项判据全部满足。");
     } else {
-        println!("结论：P4-4 未通过——");
+        println!("结论：未通过——");
         for line in bad {
             println!("  · {line}");
         }
@@ -805,6 +973,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
     let mut min_ms = DEFAULT_MIN_DELAY_MS;
     let mut max_ms = DEFAULT_MAX_DELAY_MS;
     let mut compensate = true;
+    let mut net = NetConditions::default();
+    let mut tuning = DriftTuning::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -830,13 +1000,43 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     .parse()
                     .map_err(|e| format!("--max-ms 不是整数：{e}"))?;
             }
+            "--jitter-ms" => {
+                net.jitter_ms = crate::next_value(args, &mut i, "--jitter-ms")?
+                    .parse()
+                    .map_err(|e| format!("--jitter-ms 不是整数：{e}"))?;
+            }
+            "--loss" => {
+                net.loss = crate::next_value(args, &mut i, "--loss")?
+                    .parse()
+                    .map_err(|e| format!("--loss 不是小数：{e}"))?;
+            }
+            "--seed" => {
+                net.seed = crate::next_value(args, &mut i, "--seed")?
+                    .parse()
+                    .map_err(|e| format!("--seed 不是整数：{e}"))?;
+            }
+            "--alpha" => {
+                tuning.ema_alpha = crate::next_value(args, &mut i, "--alpha")?
+                    .parse()
+                    .map_err(|e| format!("--alpha 不是小数：{e}"))?;
+            }
+            "--kp" => {
+                tuning.kp = crate::next_value(args, &mut i, "--kp")?
+                    .parse()
+                    .map_err(|e| format!("--kp 不是小数：{e}"))?;
+            }
+            "--deadband" => {
+                tuning.deadband_packets = crate::next_value(args, &mut i, "--deadband")?
+                    .parse()
+                    .map_err(|e| format!("--deadband 不是小数：{e}"))?;
+            }
             "--no-compensate" => compensate = false,
             other => return Err(format!("drift-run 不认识参数 {other:?}")),
         }
         i += 1;
     }
 
-    let run = run_with(hours, ppm, min_ms, max_ms, compensate)?;
+    let run = run_full(hours, ppm, min_ms, max_ms, compensate, net, tuning)?;
     print_report(&run);
 
     if let Some(path) = out {
@@ -857,9 +1057,13 @@ pub fn main(args: &[String]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// 60 秒虚拟时间。debug 构建下也只要几秒——够看出方向，不够看出稳态。
+    /// 5 分钟虚拟时间。debug 构建下约 20 秒。
+    ///
+    /// **不能再短了**：补偿器的滤波时间常数是 4 s、比例环也是 4 s，起播那一段（队列从 0 垫到
+    /// 目标）要 20 s 才收干净；60 秒的跑法只有 1 个统计窗口，"稳态"里会整段混着起播过程，
+    /// 测出来的是收敛速度，不是稳态行为。
     fn short(ppm: f64) -> Run {
-        run(1.0 / 60.0, ppm, DEFAULT_MIN_DELAY_MS, DEFAULT_MAX_DELAY_MS).expect("跑 60 秒")
+        run(5.0 / 60.0, ppm, DEFAULT_MIN_DELAY_MS, DEFAULT_MAX_DELAY_MS).expect("跑 5 分钟")
     }
 
     #[test]
@@ -883,37 +1087,35 @@ mod tests {
 
     #[test]
     fn compensation_holds_the_budget_for_a_fast_sender() {
-        // P4-6 的正向验收：+1000 ppm（设计值的 10 倍）下缓冲必须还在预算内，且没有爆音。
+        // P4-6 的正向验收：+1000 ppm（设计值的 10 倍）下四条判据必须全过。
         let fast = short(1_000.0);
-        assert!(
-            fast.settled_mean_ms <= f64::from(DEFAULT_MAX_DELAY_MS) + 1.0,
-            "补偿器没把缓冲压回预算：{:.2} ms",
-            fast.settled_mean_ms
-        );
-        assert_eq!(fast.hard_steps, 0, "拼接把波形撕裂了");
-        // 已知缺陷（C-34）：环水位是记账估出来的，丢样本时偶尔把它压到一帧以下，
-        // 音频侧当场拿到 10 ms 静音。判据要 0，实测 4 小时 2 次——先钉一个上界，
-        // 修好之后这里要收紧成 0。
-        assert!(
-            fast.underruns <= 3,
-            "补偿器把 PCM 环抽干了：{} 次下溢",
-            fast.underruns
-        );
+        let bad = violations(&fast);
+        assert!(bad.is_empty(), "正向 +1000 ppm 判据不过：{bad:?}");
         assert!(
             fast.drift_excised_samples > 0,
             "正向漂移一个样本都没丢，补偿器根本没动"
         );
+        assert!(fast.extra_pulls > 0, "正向漂移一次都没多拉");
     }
 
     #[test]
-    fn compensation_does_not_yet_absorb_a_slow_sender() {
-        // **已知缺陷快照**（C-35）：补样本抬高 PCM 环水位，而拉包规则又按「环太高就少拉」去压它，
-        // 两条规则互相追，控制环自激。等这条修好，把断言反过来。
+    fn compensation_holds_the_budget_for_a_slow_sender() {
+        // P4-6 的反向验收。第一版（C-35）在这里自激：补样本抬高 PCM 环，而「环太高就少拉」
+        // 又降不下环（少拉写 480 = 环不变），于是永远少拉、队列涨到 18 包。
         let slow = short(-1_000.0);
         let bad = violations(&slow);
+        assert!(bad.is_empty(), "反向 −1000 ppm 判据不过：{bad:?}");
         assert!(
-            !bad.is_empty(),
-            "反向漂移居然通过了——如果控制环修好了，把这条测试改成断言它通过"
+            slow.drift_inserted_samples > 0,
+            "反向漂移一个样本都没补，补偿器根本没动"
+        );
+        assert!(slow.skipped_pulls > 0, "反向漂移一次都没少拉");
+        // 丢和补不能同时对打：那是控制环在自我追逐。
+        assert!(
+            slow.drift_excised_samples * 4 < slow.drift_inserted_samples,
+            "反向漂移里丢了 {} 个样本、补了 {} 个——两个方向在对打",
+            slow.drift_excised_samples,
+            slow.drift_inserted_samples
         );
     }
 

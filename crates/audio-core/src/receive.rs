@@ -173,12 +173,10 @@ impl ReceivePath {
                 packets,
                 pcm,
                 buffer,
-                // **默认关闭**：P4-6 的补偿器目前只在正向漂移上稳住了（见 measurements §3.4），
-                // 反向还会自激振荡，所以不放进默认路径。P5 接线前必须把这一行改成 `default()`。
-                drift: DriftControl::new(DriftConfig {
-                    enabled: false,
-                    ..DriftConfig::default()
-                }),
+                // **默认开启**：P4-6 在 ±100 ppm、4 小时虚拟时间上四条判据全绿（见 measurements
+                // §3.4），且 0 ppm 下逐样本透明（0 丢 0 补）。没有它，±100 ppm 就会把缓冲推出
+                // 预算（C-30/C-31）。
+                drift: DriftControl::new(DriftConfig::default()),
                 stats: ReceiveStats::default(),
                 next_expected: None,
             },

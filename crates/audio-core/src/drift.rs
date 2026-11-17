@@ -38,8 +38,37 @@
 //! 丢 `d` 个样本：在 `X` 处把 `in[X..X+F]` 淡出、`in[X+d..X+d+F]` 淡入（等功率），输出短 `d`。
 //! 补 `m` 个样本：把信号在 `X` 处**倒回** `m` 个样本（等于重放 `in[X-m..X]`），再用同样长度的
 //! 交叉淡化接回 `in[X-m+F..]`，输出长 `m`。`F = 64`（1.33 ms）足够盖住 1 ms 级的时间跳变。
+//!
+//! # 为什么「少拉一帧」必须**一个样本都不写**
+//!
+//! 这一条是 P4-6 反向（发送方慢）自激振荡的根因，改了一版才看清：
+//!
+//! PCM 环每 tick 的净变化 = `写进去的样本数 − 480`（音频侧固定取走 480）。而
+//!
+//! - `多拉一帧` 写 960 个 → 环 +480（**唯一能让环变深的动作**）；
+//! - `正常一帧` 写 480 个 → 环不变；
+//! - `少拉一帧` 写多少？**必须是 0**。写 480（回放上一帧）等于环不变，那么反向漂移时
+//!   「补样本让环变深」就没有任何东西能把它变浅——环只会一路涨到溢出。
+//!
+//! 第一版就是回放上一帧，于是反向长跑变成：补样本抬高环 → 环太高就少拉 → 少拉不降环 →
+//! 永远少拉 → 队列涨到 18 包、均值 55.84 ms、峰值 197 ms。少拉写 0 之后，环靠**存货**顶上
+//! 那一帧，行为完全透明（PCM 环本来就是连续样本流，不写就是不写，没有任何拼接）。
+//!
+//! # 已知局限：抖动会让它做无效功（C-37）
+//!
+//! 这个补偿器唯一的传感器是「排队包数」，而排队包数同时被**漂移**（直流）和**网络抖动**
+//! （交流）推动。滤波器是 200 ms 的 EMA，抖动的尺度就在 10–100 ms，于是抖动原样进到误差里，
+//! 控制器每 tick 都饱和在 ±`MAX_SLIP`。实测 1 小时「抖动 0–10 ms + 0.5 % 丢包」：
+//! 丢 178 k、补 265 k 个样本，而真正的漂移只有 17 k —— **26 倍的无效工作**。
+//!
+//! 它没有变坏（0 下溢、0 硬跳变、0 软跳变、`max_step` 只是平滑上界的 1.49 倍），但这份工作是白做的。
+//! 正确的修法**不是**把 EMA 放慢：闭环特征方程是 `s² + αs + kp = 0`，α 必须 ≥ 2√kp 才不振荡，
+//! 实测 α = 0.0005、kp = 0.02 时 Q ≈ 283，反向 4 小时里丢 30 918、补 40 635 个样本，两个方向
+//! 在对打。真正该换的是**传感器**：漂移可以从「序号推进 / tick 推进」直接量出来
+//! （`Δseq / Δtick − 1`），这个比值对抖动和丢包都免疫，量出来就是 ε，不需要反馈环去猜。
+//! 那需要网络层把序号喂进来，属于 P5 的接线范围，所以这一版先记在这里。
 
-use crate::{FRAME_SAMPLES, Frame};
+use crate::FRAME_SAMPLES;
 
 /// 抖动缓冲里**排队包数**的目标。
 ///
@@ -53,20 +82,31 @@ use crate::{FRAME_SAMPLES, Frame};
 pub const DEFAULT_TARGET_PACKETS: f32 = 2.0;
 
 /// 深度滤波的 EMA 系数。抖动缓冲深度按包跳变（±480 一次），不滤会带着补偿器乱跳。
-const EMA_ALPHA: f32 = 0.05;
+///
+/// **这个数字决定了「补偿器会不会去追网络抖动」**。漂移是直流、抖动是交流，滤波器的截止频率
+/// 决定两者分不分得开。实测（1 小时「抖动 0–10 ms + 0.5 % 丢包」联合跑）：0.05 下补偿器
+/// 一小时丢了 178 k、补了 265 k 个样本，而真正的漂移只有 17 k——26 倍的无效工作，听感上是
+/// 持续的轻微抖动。把 EMA 放到秒级能把这份工作压掉 33 倍。
+///
+/// **但放慢 EMA 会毁掉环的阻尼**：闭环特征方程是 `s² + αs + kp = 0`，α 必须 ≥ 2√kp 才
+/// 不振荡。α = 0.05、kp = 0.02 时 Q ≈ 5.6（几百个 tick 收干净）；α = 0.0005 时 Q ≈ 283，
+/// 实测反向 4 小时里丢 30 918、补 40 635 个样本——两个方向在对打。所以这一版**不动** EMA，
+/// 联合长跑的过度补偿记成已知缺陷（C-37），正确修法是换传感器（见 `DriftControl` 的文档）。
+pub const DEFAULT_EMA_ALPHA: f32 = 0.05;
 
 /// 比例增益：排队包数的误差 → 本 tick 该丢的样本数。
 ///
-/// 稳态误差 = `ε / KP` 个包，ε = 100 ppm 时约 0.0002 个包（0.1 个样本）——是「钉住」
-/// 而不是「跟随」。
-const KP: f32 = 0.02;
+/// 稳态误差 = `ε / KP` 个包。100 ppm 下是 0.005 个包（2.4 个样本）——是「钉住」而不是
+/// 「跟随」。**这个数字和 EMA 系数是两件独立的事**：KP 决定稳态偏置，EMA 决定抖动滤不滤得掉。
+/// 一开始把它们一起缩放，结果 1000 ppm 下偏置涨到 20 ms、缓冲跑到 56 ms；分开之后就没事了。
+pub const DEFAULT_KP: f32 = 0.02;
 
 /// 死区（单位：包）。误差在死区内时不做任何拼接。
 ///
 /// 队列是按整包计量的，采样点上天然有 ±1 包的跳变；没有死区的话，滤波后的残余纹波会让
 /// 补偿器每 tick 都做一次 ±1 样本的拼接——实测 4 小时里有 24 % 的样本流过拼接点，
 /// 白白把 `max_step` 抬到平滑上界的 4 倍。
-const DEADBAND_PACKETS: f32 = 0.05;
+pub const DEFAULT_DEADBAND_PACKETS: f32 = 0.005;
 
 /// 每 tick 最多丢/补多少样本。4 个样本 = 0.083 ms，即最多 0.83 % 的瞬时压缩率。
 ///
@@ -80,11 +120,31 @@ const CROSSFADE: usize = 64;
 /// 输出缓冲的上限：两帧加最多一次插入。`ReceivePath` 按这个尺寸备缓冲。
 pub const MAX_OUTPUT_SAMPLES: usize = 2 * FRAME_SAMPLES + MAX_SLIP as usize;
 
+/// PCM 环水位的下界（样本）。低于它就多拉一帧。
+///
+/// **为什么是「一帧 + MAX_SLIP」而不是「一帧」**：环水位的落差只能按整帧走（多拉 +480、
+/// 少拉 −480），所以环只会在 480 的整数倍附近落脚；而丢样本每一 tick 最多从环里拿走
+/// `MAX_SLIP` 个。下界取 `480 + MAX_SLIP = 482`，于是「刚好踩到下界」之后还丢得动 2 个，
+/// 落点仍是 480 —— 音频侧一次取 480 个，正好够，不会饿。下界取 480 时实测会掉到 478，
+/// 那就是一次两样本的静音（P4-6 正向长跑里 4 小时 2 次下溢的来源）。
+const RING_LOW: i64 = FRAME_SAMPLES as i64 + MAX_SLIP as i64;
+
+/// PCM 环水位的上界（样本）。高于它就少拉一帧。
+///
+/// 少拉一帧会从环里拿走整整 480 个，所以上界必须是「下界 + 一帧」，少拉之后才落得回安全区。
+const RING_HIGH: i64 = RING_LOW + FRAME_SAMPLES as i64;
+
 /// 补偿器配置。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DriftConfig {
     /// 抖动缓冲里排队包数的目标。
     pub target_packets: f32,
+    /// 深度滤波的 EMA 系数（每 tick）。见 [`DEFAULT_EMA_ALPHA`]。
+    pub ema_alpha: f32,
+    /// 比例增益。见 [`DEFAULT_KP`]。
+    pub kp: f32,
+    /// 死区（包）。见 [`DEFAULT_DEADBAND_PACKETS`]。
+    pub deadband_packets: f32,
     /// 关掉就是完全直通（逐样本一致），用于回归对照。
     pub enabled: bool,
 }
@@ -93,6 +153,9 @@ impl Default for DriftConfig {
     fn default() -> Self {
         Self {
             target_packets: DEFAULT_TARGET_PACKETS,
+            ema_alpha: DEFAULT_EMA_ALPHA,
+            kp: DEFAULT_KP,
+            deadband_packets: DEFAULT_DEADBAND_PACKETS,
             enabled: true,
         }
     }
@@ -132,15 +195,14 @@ pub struct DriftStats {
 pub struct DriftControl {
     config: DriftConfig,
     filtered: f32,
-    primed: bool,
     /// 带小数的「本 tick 该丢多少样本」。整数部分才是这一 tick 真正丢的。
     ///
     /// 必须有这个累加器：100 ppm 下稳态只需每 tick 丢 **0.048** 个样本，直接取整会永远是 0，
     /// 补偿器就完全不动了。
     accum: f32,
+    /// 本 tick 打算丢（正）或补（负）多少样本。**还没记账**——真正做了才从 `accum` 里扣，
+    /// 见 [`DriftControl::process`]。
     slip: i32,
-    history: Frame,
-    has_history: bool,
     stats: DriftStats,
 }
 
@@ -208,12 +270,12 @@ impl DriftControl {
     pub fn new(config: DriftConfig) -> Self {
         Self {
             config,
-            filtered: 0.0,
-            primed: false,
+            // 滤波器**从目标起步**，不是从第一次读数起步。起播那一瞬间队列是 0，从 0 起步会
+            // 让补偿器把「刚开机还没收到包」当成「缓冲太浅」，一路补样本、把环推满，然后花
+            // 几分钟收回来——实测 EMA 0.0005 时 5 分钟跑法的「稳态」里全是这段尾巴。
+            filtered: config.target_packets,
             accum: 0.0,
             slip: 0,
-            history: [0.0; FRAME_SAMPLES],
-            has_history: false,
             // 环水位**如实**从 0 开始记账。之前这里给了「一帧垫子」，等于让估计值比真实
             // 水位高 480：于是「环太满就少拉」在真实水位只有一帧时就触发，反向漂移下把环
             // 抽干、把队列推到 18 包。估计值必须等于真实值，垫子要靠多拉真拉出来。
@@ -228,18 +290,13 @@ impl DriftControl {
             return PullPlan::One;
         }
         let depth = queued_packets as f32;
-        if self.primed {
-            self.filtered += (depth - self.filtered) * EMA_ALPHA;
-        } else {
-            self.filtered = depth;
-            self.primed = true;
-        }
+        self.filtered += (depth - self.filtered) * self.config.ema_alpha;
 
         let mut error_packets = self.filtered - self.config.target_packets;
-        if error_packets.abs() < DEADBAND_PACKETS {
+        if error_packets.abs() < self.config.deadband_packets {
             error_packets = 0.0;
         }
-        self.accum += error_packets * FRAME_SAMPLES as f32 * KP;
+        self.accum += error_packets * FRAME_SAMPLES as f32 * self.config.kp;
         let limit = MAX_SLIP as f32 * 8.0;
         self.accum = self.accum.clamp(-limit, limit);
         let mut slip = self
@@ -253,7 +310,8 @@ impl DriftControl {
         if slip > 0 && self.stats.ring_level < 2 * MAX_SLIP as i64 {
             slip = 0;
         }
-        self.accum -= slip as f32;
+        // 这里**不扣** `accum`：少拉一帧的那一 tick 什么都写不进环，也就没有丢/补可言。
+        // 记账放到 `process` 里，按实际做成的幅度扣。
         self.slip = slip;
 
         // 拉包次数**只看 PCM 环水位**，一个规则，没有第二套记账。
@@ -268,12 +326,10 @@ impl DriftControl {
         //
         // 环里始终留一帧垫子：`< 一帧` 就多拉，`> 两帧` 就少拉，于是环恒在 [1 帧, 2 帧]，
         // 音频侧不会饿，也撑不爆。
-        let low = FRAME_SAMPLES as i64;
-        let high = 2 * FRAME_SAMPLES as i64;
         let mut plan = PullPlan::One;
-        if self.stats.ring_level < low {
+        if self.stats.ring_level < RING_LOW {
             plan = PullPlan::Two;
-        } else if self.stats.ring_level > high && self.has_history {
+        } else if self.stats.ring_level > RING_HIGH {
             plan = PullPlan::Zero;
         }
         match plan {
@@ -284,34 +340,32 @@ impl DriftControl {
         plan
     }
 
-    /// 把本 tick 取到的样本（一帧、两帧，或空 = 没拉）加工成要写进 PCM 环的样本，返回长度。
+    /// 把本 tick 取到的样本（一帧、两帧，或空 = 一帧都没拉）加工成要写进 PCM 环的样本，
+    /// 返回长度。
+    ///
+    /// `input` 为空 = 本 tick 少拉了一帧（[`PullPlan::Zero`]）。这时**一个样本都不写**，
+    /// 音频侧要的那 480 个样本由 PCM 环里的存货顶上。这是「少拉」能真正让环变浅的唯一写法，
+    /// 理由见模块文档「为什么少拉一帧必须一个样本都不写」。
     pub fn process(&mut self, input: &[f32], out: &mut [f32]) -> usize {
-        let mut scratch = [0.0_f32; FRAME_SAMPLES];
-        let source: &[f32] = if input.is_empty() {
-            if !self.has_history {
-                return 0;
-            }
-            scratch.copy_from_slice(&self.history);
-            &scratch
-        } else {
-            input
-        };
-
-        let slip = if self.config.enabled { self.slip } else { 0 };
-        let len = splice(source, slip, out);
-
-        if source.len() >= FRAME_SAMPLES {
-            let start = source.len() - FRAME_SAMPLES;
-            self.history.copy_from_slice(&source[start..]);
-            self.has_history = true;
+        if input.is_empty() {
+            self.slip = 0;
+            self.stats.ring_level -= FRAME_SAMPLES as i64;
+            return 0;
         }
 
+        let slip = if self.config.enabled { self.slip } else { 0 };
+        let len = splice(input, slip, out);
+
+        // 只有**真正做成**的幅度才记账：输入不足一帧时 `splice` 会自行缩小幅度，
+        // 拿打算做的数字去记会让环水位和实际写进环的样本数对不上。
+        let applied = input.len() as i64 - len as i64;
+        self.accum -= applied as f32;
         self.stats.ring_level += len as i64 - FRAME_SAMPLES as i64;
-        if slip > 0 {
-            self.stats.excised_samples += slip as u64;
+        if applied > 0 {
+            self.stats.excised_samples += applied as u64;
             self.stats.excise_events += 1;
-        } else if slip < 0 {
-            self.stats.inserted_samples += (-slip) as u64;
+        } else if applied < 0 {
+            self.stats.inserted_samples += (-applied) as u64;
             self.stats.insert_events += 1;
         }
         len
@@ -447,22 +501,93 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shallow_queue_inserts_and_skips_pulls() {
+    /// 闭环复现：虚拟抖动缓冲 + 补偿器，跑 `ticks` 个 tick。
+    ///
+    /// 返回 `(环水位最小, 环水位最大, 末尾排队包数, 补偿器)`。排队量按样本记账、取整成包，
+    /// 和真实路径「先收包、再看队列、再拉包」的顺序一致。
+    fn closed_loop(ppm: f32, ticks: usize) -> (i64, i64, f32, DriftControl) {
         let mut control = DriftControl::new(DriftConfig::default());
+        let signal = tone(2);
         let mut out = [0.0_f32; MAX_OUTPUT_SAMPLES];
-        let mut saw_zero = false;
-        for _ in 0..2000 {
-            let plan = control.begin_tick(0);
-            saw_zero |= plan == PullPlan::Zero;
-            let frames = if plan == PullPlan::Two { 2 } else { 1 };
-            let len = control.process(&tone(frames), &mut out);
-            assert!(len >= FRAME_SAMPLES, "缓冲太浅却把输出弄短了");
+        // 起播就有两帧，对应真实路径「第一个包到了才开拉」之后的状态。
+        let mut queue = 2.0_f32 * FRAME_SAMPLES as f32;
+        let mut ring_min = i64::MAX;
+        let mut ring_max = i64::MIN;
+        for tick in 0..ticks {
+            queue += FRAME_SAMPLES as f32 * (1.0 + ppm * 1e-6);
+            let queued = (queue / FRAME_SAMPLES as f32) as u32;
+            let plan = control.begin_tick(queued);
+            let pulls = match plan {
+                PullPlan::Zero => 0,
+                PullPlan::One => 1,
+                PullPlan::Two => 2,
+            };
+            // 环里没那么多帧时拉不出来（真实路径里 buffer.pull() 返回 Err）。
+            let take = (pulls as f32 * FRAME_SAMPLES as f32).min(queue);
+            queue -= take;
+            let frames = (take / FRAME_SAMPLES as f32).round() as usize;
+            let len = control.process(&signal[..frames * FRAME_SAMPLES], &mut out);
+            assert!(
+                len + MAX_SLIP as usize >= frames * FRAME_SAMPLES,
+                "输出比拉进来的还短了太多：{len} vs {frames} 帧"
+            );
+            // 起播几百个 tick 是「环从 0 垫到一帧」的过程，不算稳态。
+            if tick > 500 {
+                ring_min = ring_min.min(control.stats().ring_level);
+                ring_max = ring_max.max(control.stats().ring_level);
+            }
         }
-        assert!(saw_zero, "缓冲见底却一次都没少拉");
+        (ring_min, ring_max, queue / FRAME_SAMPLES as f32, control)
+    }
+
+    #[test]
+    fn a_fast_sender_is_absorbed_without_runaway() {
+        // 正向闭环：发送方每 tick 多产 0.048 个样本，补偿器必须靠「多拉 + 丢样本」吸收，
+        // 队列钉住、环水位留在 [1 帧, 2 帧]。
+        let (ring_min, ring_max, queue, control) = closed_loop(100.0, 200_000);
+        let stats = control.stats();
+        assert!(stats.extra_pulls > 0, "正向漂移一次都没多拉");
+        assert!(stats.excised_samples > 0, "正向漂移一个样本都没丢");
         assert!(
-            control.stats().inserted_samples > 0,
-            "缓冲见底却一个样本都没补"
+            ring_min >= FRAME_SAMPLES as i64,
+            "环被抽到 {ring_min} 个样本（不足一帧，音频侧会饿）"
+        );
+        assert!(
+            ring_max <= RING_HIGH + MAX_SLIP as i64,
+            "环涨到 {ring_max} 个样本（超过两帧，白白多付延迟）"
+        );
+        assert!(
+            (1.0..=3.0).contains(&queue),
+            "队列没被钉住：末尾 {queue:.2} 包"
+        );
+    }
+
+    #[test]
+    fn a_slow_sender_is_absorbed_without_runaway() {
+        // 反向闭环 —— P4-6 第一版就是死在这里（自激：补样本抬环 → 环太高就少拉 →
+        // 少拉不降环 → 永远少拉 → 队列涨到 18 包）。
+        let (ring_min, ring_max, queue, control) = closed_loop(-100.0, 200_000);
+        let stats = control.stats();
+        assert!(stats.skipped_pulls > 0, "反向漂移一次都没少拉");
+        assert!(stats.inserted_samples > 0, "反向漂移一个样本都没补");
+        assert!(
+            ring_min >= FRAME_SAMPLES as i64,
+            "环被抽到 {ring_min} 个样本（不足一帧，音频侧会饿）"
+        );
+        assert!(
+            ring_max <= RING_HIGH + MAX_SLIP as i64,
+            "环涨到 {ring_max} 个样本（超过两帧，白白多付延迟）"
+        );
+        assert!(
+            (1.0..=3.0).contains(&queue),
+            "队列没被钉住：末尾 {queue:.2} 包（自激振荡）"
+        );
+        // 丢和补不能同时对打：那是控制环在自我追逐，不是补偿。
+        assert!(
+            stats.excised_samples * 4 < stats.inserted_samples,
+            "反向漂移里丢了 {} 个样本、补了 {} 个——两个方向在对打",
+            stats.excised_samples,
+            stats.inserted_samples
         );
     }
 }
