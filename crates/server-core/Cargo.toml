@@ -10,3 +10,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+protocol = { path = "../protocol", version = "0.0.0" }
+transport = { path = "../transport", version = "0.0.0" }
+argon2 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+protocol = { path = "../protocol", version = "0.0.0" }
+transport = { path = "../transport", version = "0.0.0" }

@@ -24,6 +24,14 @@ sonora-simd = "0.3"                         # sonora-agc2 的 SIMD 后端，需�
 opus = "0.4"
 neteq = { version = "0.9", default-features = false }   # 必须关默认 feature，否则拉进 axum/tokio
 chacha20poly1305 = "0.11"
+hkdf = "0.13"                                # 语音密钥派生（HKDF-SHA256），RFC 5869
+sha2 = "0.11"                                # hkdf 的哈希后端
+prost = "0.14"                               # 控制面 protobuf 运行时
+argon2 = "0.6"                               # 密码登录校验（argon2id，PHC 字符串）
+# 构建期依赖：protox 是**纯 Rust** 的 protobuf 编译器，因此 CI/新机器不需要装 protoc。
+# 只有 build.rs 用，不进任何运行时二进制。
+prost-build = "0.14"
+protox = "0.10"
 # testkit（离线工具）用：wav 读写、报告 JSON。只在 CLI 侧，不进实时链路。
 hound = "3"                                  # WAV 读写，Apache-2.0
 serde = { version = "1", features = ["derive"] }

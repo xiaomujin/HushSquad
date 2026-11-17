@@ -10,3 +10,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+protocol = { path = "../protocol", version = "0.0.0" }
+transport = { path = "../transport", version = "0.0.0" }
+
+[dev-dependencies]
+# 只为一条一致性测试：线格式的「一帧多少采样」必须与音频侧一致。
+audio-core = { path = "../audio-core", version = "0.0.0" }
