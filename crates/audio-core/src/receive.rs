@@ -28,10 +28,17 @@ use crate::jitter::JitterBuffer;
 use crate::{FRAME_SAMPLES, Frame};
 
 /// 一个入站包（固定大小，环里不分配）。
+///
+/// 序列号与时间戳是**载荷的一部分**，不是缓冲自己编的：丢包只能靠序号空洞被发现，
+/// 见 [`crate::jitter::JitterBuffer::push`]。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IncomingPacket {
     /// 发送方标识（v1 用 ssrc）。
     pub sender: u32,
+    /// RTP 序列号（16 位回绕）。
+    pub seq: u16,
+    /// RTP 时间戳（48 kHz 样本，每帧 +480）。
+    pub timestamp: u32,
     /// 有效载荷长度。
     pub len: u16,
     /// 载荷本体（Opus 包）。
@@ -41,12 +48,14 @@ pub struct IncomingPacket {
 impl IncomingPacket {
     /// 从切片构造，超长会被截断（Opus 包不会超过 400 字节，截断只是防御）。
     #[must_use]
-    pub fn new(sender: u32, payload: &[u8]) -> Self {
+    pub fn new(sender: u32, seq: u16, timestamp: u32, payload: &[u8]) -> Self {
         let mut buf = [0_u8; MAX_PACKET_BYTES];
         let len = payload.len().min(MAX_PACKET_BYTES);
         buf[..len].copy_from_slice(&payload[..len]);
         Self {
             sender,
+            seq,
+            timestamp,
             len: len as u16,
             payload: buf,
         }
@@ -76,12 +85,18 @@ impl PacketSender {
 pub struct ReceiveStats {
     /// 入队成功的包数。
     pub packets_in: u64,
-    /// 因为环满而丢掉的包数。
-    pub packets_dropped_full: u64,
+    /// 抖动缓冲**拒收**的包数（时间戳跳变越界、或 neteq 内部缓冲满）。
+    ///
+    /// 注意：包环满导致丢弃发生在发送侧，由 [`PacketSender::send`] 返回 `false` 上报。
+    pub packets_rejected: u64,
+    /// 从序列号空洞**推断**出来的丢包数（网络丢的，不是我们丢的）。
+    pub packets_lost: u64,
     /// 抖动缓冲解码出的帧数。
     pub frames_decoded: u64,
     /// 抖动缓冲没给出帧（空缓冲 / 错误）的次数。
     pub frames_missing: u64,
+    /// 抖动缓冲给出的帧长不是 480 的次数（时间伸缩会改变帧长，属正常但要能看见）。
+    pub frames_off_size: u64,
     /// PCM 环满、丢掉的样本数（音频侧没跟上）。
     pub samples_dropped_full: u64,
 }
@@ -131,6 +146,8 @@ pub struct ReceivePath {
     pcm: Producer<f32>,
     buffer: JitterBuffer,
     stats: ReceiveStats,
+    /// 下一个期望的序列号（`None` = 还没收到第一个包）。用来把网络丢包变成可见的数字。
+    next_expected: Option<u16>,
 }
 
 impl ReceivePath {
@@ -154,6 +171,7 @@ impl ReceivePath {
                 pcm,
                 buffer,
                 stats: ReceiveStats::default(),
+                next_expected: None,
             },
             PcmReceiver {
                 consumer,
@@ -170,17 +188,27 @@ impl ReceivePath {
             if packet.sender != self.sender {
                 continue;
             }
-            if self.buffer.push(packet.as_slice()).is_ok() {
+            self.note_seq(packet.seq);
+            if self
+                .buffer
+                .push(packet.seq, packet.timestamp, packet.as_slice())
+                .is_ok()
+            {
                 self.stats.packets_in += 1;
             } else {
-                self.stats.packets_dropped_full += 1;
+                self.stats.packets_rejected += 1;
             }
         }
 
         match self.buffer.pull() {
             Ok(frame) => {
                 self.stats.frames_decoded += 1;
-                for sample in frame.samples.iter().take(FRAME_SAMPLES) {
+                // 时间伸缩会改变帧长（加速时变短、合并时变长）。这里照单全收、只计数：
+                // PCM 环是**样本流**，`pull_frame` 永远取 480 个，帧边界不影响它。
+                if frame.samples.len() != FRAME_SAMPLES {
+                    self.stats.frames_off_size += 1;
+                }
+                for sample in &frame.samples {
                     // 环满 = 音频侧没跟上，丢掉最旧的写法会把时序搞乱；这里直接丢新样本并计数。
                     if self.pcm.push(*sample).is_err() {
                         self.stats.samples_dropped_full += 1;
@@ -189,6 +217,25 @@ impl ReceivePath {
                 }
             }
             Err(_) => self.stats.frames_missing += 1,
+        }
+    }
+
+    /// 用序列号空洞把网络丢包数出来。
+    ///
+    /// 只处理 16 位回绕下的前向空洞：序号往回走（迟到、重复、重排后到）不计丢失——
+    /// 那些包 NetEQ 自己会按序号丢弃或重排，我们不该重复记一遍。
+    fn note_seq(&mut self, seq: u16) {
+        match self.next_expected {
+            None => self.next_expected = Some(seq.wrapping_add(1)),
+            Some(expected) => {
+                let ahead = seq.wrapping_sub(expected);
+                if ahead == 0 {
+                    self.next_expected = Some(expected.wrapping_add(1));
+                } else if ahead < 0x8000 {
+                    self.stats.packets_lost += u64::from(ahead);
+                    self.next_expected = Some(seq.wrapping_add(1));
+                }
+            }
         }
     }
 
@@ -202,6 +249,22 @@ impl ReceivePath {
     #[must_use]
     pub fn buffered_ms(&self) -> u32 {
         self.buffer.buffered_ms()
+    }
+
+    /// 设置目标延迟的上下限（毫秒），返回实际生效的 `(下限, 上限)`。
+    ///
+    /// 不调这个，抖动缓冲会用 NetEQ 的默认目标延迟 **80 ms**——那是浏览器场景的调参，
+    /// 而附录 A 第 9 行的预算是 L1 10–15 ms / L2 15–20 ms。
+    pub fn set_delay_limits(&mut self, min_ms: u32, max_ms: u32) -> (u32, u32) {
+        let max = self.buffer.set_maximum_delay(max_ms);
+        let min = self.buffer.set_minimum_delay(min_ms);
+        (min, max)
+    }
+
+    /// 抖动缓冲的目标延迟（毫秒），进测量报告用。
+    #[must_use]
+    pub fn target_delay_ms(&self) -> u32 {
+        self.buffer.target_delay_ms()
     }
 }
 
@@ -242,9 +305,10 @@ mod tests {
         // 网络侧塞 10 帧 → tick 足够多次 → 音频侧必须取到有声的帧。
         let (mut tx, mut path, mut out) = ReceivePath::new(SENDER, 32, 8).expect("构造接收路径");
         let mut codec = OpusCodec::with_defaults().expect("构造编码器");
-        for index in 0..10 {
-            let payload = encode(&mut codec, index);
-            assert!(tx.send(IncomingPacket::new(SENDER, &payload)), "入队失败");
+        for index in 0..10_u32 {
+            let payload = encode(&mut codec, index as usize);
+            let packet = IncomingPacket::new(SENDER, index as u16, index * 480, &payload);
+            assert!(tx.send(packet), "入队失败");
         }
 
         let mut frames: Vec<Frame> = Vec::new();
@@ -262,7 +326,7 @@ mod tests {
         );
         let stats = path.stats();
         assert_eq!(stats.packets_in, 10, "10 个包都该进抖动缓冲");
-        assert_eq!(stats.packets_dropped_full, 0);
+        assert_eq!(stats.packets_rejected, 0);
     }
 
     #[test]
@@ -270,7 +334,7 @@ mod tests {
         let (mut tx, mut path, _out) = ReceivePath::new(SENDER, 16, 4).expect("构造接收路径");
         let mut codec = OpusCodec::with_defaults().expect("构造编码器");
         let payload = encode(&mut codec, 0);
-        assert!(tx.send(IncomingPacket::new(SENDER + 1, &payload)));
+        assert!(tx.send(IncomingPacket::new(SENDER + 1, 0, 0, &payload)));
         for _ in 0..3 {
             path.tick();
         }
@@ -281,9 +345,82 @@ mod tests {
     fn packet_ring_full_is_reported_not_panicked() {
         // 环容量 2：塞 3 个包，第三个必须返回 false 而不是阻塞或 panic。
         let (mut tx, _path, _out) = ReceivePath::new(SENDER, 2, 4).expect("构造接收路径");
-        let packet = IncomingPacket::new(SENDER, &[1, 2, 3]);
+        let packet = IncomingPacket::new(SENDER, 0, 0, &[1, 2, 3]);
         assert!(tx.send(packet));
         assert!(tx.send(packet));
         assert!(!tx.send(packet), "环满应当返回 false");
+    }
+
+    #[test]
+    fn sequence_gap_is_counted_and_concealed() {
+        // P4-3 的地基：丢掉中间一个包，接收侧必须（1）数出来、（2）让 NetEQ 走 PLC，
+        // 而不是把后面的音频往前挪。旧实现自己递增序号，这两件事都不会发生。
+        let (mut tx, mut path, mut out) = ReceivePath::new(SENDER, 32, 8).expect("构造接收路径");
+        let mut codec = OpusCodec::with_defaults().expect("构造编码器");
+        for index in 0..12_u32 {
+            if index == 5 {
+                continue; // 网络把它丢了
+            }
+            let payload = encode(&mut codec, index as usize);
+            let packet = IncomingPacket::new(SENDER, index as u16, index * 480, &payload);
+            assert!(tx.send(packet), "入队失败");
+        }
+
+        let mut samples: Vec<f32> = Vec::new();
+        for _ in 0..30 {
+            path.tick();
+            let mut frame: Frame = [0.0; FRAME_SAMPLES];
+            if out.pull_frame(&mut frame) {
+                samples.extend_from_slice(&frame);
+            }
+        }
+
+        let stats = path.stats();
+        assert_eq!(stats.packets_lost, 1, "序列号空洞应当被数成 1 个丢包");
+        assert_eq!(stats.packets_in, 11, "其余 11 个包都该进抖动缓冲");
+        assert_eq!(stats.frames_missing, 0, "缓冲里有数据，不该报缺帧");
+        assert!(
+            samples.iter().any(|s| s.abs() > 0.05),
+            "输出全静音——PLC 没跑起来"
+        );
+    }
+
+    #[test]
+    fn sequence_wraparound_is_not_mistaken_for_loss() {
+        // 16 位序号回绕是真实存在的（65535 -> 0）。当成丢包会虚报 65 536 个丢包。
+        let (mut tx, mut path, _out) = ReceivePath::new(SENDER, 64, 4).expect("构造接收路径");
+        let mut codec = OpusCodec::with_defaults().expect("构造编码器");
+        let payload = encode(&mut codec, 0);
+        // 注意时间戳**不能**跟着序号一起回绕：真实 RTP 里时间戳按样本计数，48 kHz 下要 24.8 小时
+        // 才回绕一次，而序号 11 分钟就回绕一次。让两者同步回绕等于伪造一个 11 分钟的时间倒流。
+        for (seq, timestamp) in [
+            (65_534_u16, 100_000_u32),
+            (65_535, 100_480),
+            (0, 100_960),
+            (1, 101_440),
+        ] {
+            let packet = IncomingPacket::new(SENDER, seq, timestamp, &payload);
+            assert!(tx.send(packet), "入队失败");
+        }
+        for _ in 0..4 {
+            path.tick();
+        }
+        assert_eq!(path.stats().packets_lost, 0, "回绕不是丢包");
+    }
+
+    #[test]
+    fn late_and_duplicate_packets_do_not_count_as_loss() {
+        // 乱序后到的包（序号往回走）不该被记成丢包，否则弱网统计会双重计数。
+        let (mut tx, mut path, _out) = ReceivePath::new(SENDER, 64, 4).expect("构造接收路径");
+        let mut codec = OpusCodec::with_defaults().expect("构造编码器");
+        let payload = encode(&mut codec, 0);
+        for seq in [0_u16, 1, 2, 1, 3] {
+            let packet = IncomingPacket::new(SENDER, seq, u32::from(seq) * 480, &payload);
+            assert!(tx.send(packet), "入队失败");
+        }
+        for _ in 0..5 {
+            path.tick();
+        }
+        assert_eq!(path.stats().packets_lost, 0, "重排/重复不是丢包");
     }
 }

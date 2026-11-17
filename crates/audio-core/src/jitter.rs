@@ -76,11 +76,19 @@ impl AudioDecoder for OpusDecoderAdapter {
     }
 }
 
+/// 时间戳允许的最大跳变（样本）。5 秒 @ 48 kHz。
+///
+/// 超过就认为这包不属于本流（对端时钟错乱、或有 bug），直接拒收。这不只是洁癖：
+/// `neteq` 0.9.1 的 `PacketBuffer::get_span_duration_ms` 用 `u32` 算 `span_samples * 1000`，
+/// 时间戳跨度一大就**乘溢出**——debug 构建 panic、release 构建算出垃圾。而这条路径在
+/// 网络线程上，panic 等于断音。拒收一个荒唐的包比赌它不出事便宜得多。
+pub const MAX_TIMESTAMP_JUMP: u32 = 48_000 * 5;
+
 /// 单个发送方的抖动缓冲。
 pub struct JitterBuffer {
     neteq: NetEq,
-    next_seq: u16,
-    next_timestamp: u32,
+    /// 上一个被接受的包的时间戳，用来做跳变检查。
+    last_timestamp: Option<u32>,
 }
 
 impl JitterBuffer {
@@ -98,24 +106,29 @@ impl JitterBuffer {
         neteq.register_decoder(PAYLOAD_TYPE, Box::new(OpusDecoderAdapter::new()?));
         Ok(Self {
             neteq,
-            next_seq: 0,
-            next_timestamp: 0,
+            last_timestamp: None,
         })
     }
 
-    /// 送入一个 Opus 载荷（序列号与时间戳由缓冲自己推进）。
-    pub fn push(&mut self, payload: &[u8]) -> Result<(), NetEqError> {
-        let header = RtpHeader::new(
-            self.next_seq,
-            self.next_timestamp,
-            SSRC,
-            PAYLOAD_TYPE,
-            false,
-        );
+    /// 送入一个 Opus 载荷。
+    ///
+    /// **序列号与时间戳必须由发送方给**，不能让缓冲自己递增：自己递增的话，网络丢掉的包在
+    /// NetEQ 眼里根本不存在（序号是连续的），它就不会做 PLC，只会把后面的音频往前挪——
+    /// 那是「时间压缩」而不是「丢包隐藏」，测出来的数字也就不是弱网下的数字。
+    ///
+    /// 时间戳按 48 kHz 样本计，每帧推进 [`FRAME_SAMPLES`]；乱序由 NetEQ 自己按序号重排。
+    pub fn push(&mut self, seq: u16, timestamp: u32, payload: &[u8]) -> Result<(), NetEqError> {
+        if let Some(last) = self.last_timestamp {
+            // 有符号距离：前跳为正、回跳（乱序/迟到）为负。
+            let jump = timestamp.wrapping_sub(last) as i32;
+            if jump.unsigned_abs() > MAX_TIMESTAMP_JUMP {
+                return Err(NetEqError::InvalidTimestamp);
+            }
+        }
+        let header = RtpHeader::new(seq, timestamp, SSRC, PAYLOAD_TYPE, false);
         let packet = AudioPacket::new(header, payload.to_vec(), SAMPLE_RATE, 1, FRAME_MS);
         self.neteq.insert_packet(packet)?;
-        self.next_seq = self.next_seq.wrapping_add(1);
-        self.next_timestamp = self.next_timestamp.wrapping_add(FRAME_SAMPLES as u32);
+        self.last_timestamp = Some(timestamp);
         Ok(())
     }
 
@@ -172,11 +185,13 @@ mod tests {
         let mut buffer = JitterBuffer::new().expect("构造抖动缓冲");
         let mut packet = [0_u8; MAX_PACKET_BYTES];
 
-        for index in 0..10 {
-            let frame = tone(index);
+        for index in 0..10_u32 {
+            let frame = tone(index as usize);
             let len = codec.encode(&frame, &mut packet);
             assert!(len > 0, "第 {index} 帧编码失败");
-            buffer.push(&packet[..len]).expect("入队失败");
+            buffer
+                .push(index as u16, index * FRAME_SAMPLES as u32, &packet[..len])
+                .expect("入队失败");
         }
 
         let mut loud = 0;
@@ -191,6 +206,43 @@ mod tests {
             loud > 0,
             "neteq 没解出声音——很可能落到了 StubOpusDecoder（全零输出）"
         );
+    }
+
+    #[test]
+    fn absurd_timestamp_jump_is_rejected_not_panicked() {
+        // 对端时钟错乱或恶意包不能把网络线程搞崩：neteq 0.9.1 在时间戳跨度大时会乘溢出。
+        let mut codec = OpusCodec::with_defaults().expect("构造编码器");
+        let mut packet = [0_u8; MAX_PACKET_BYTES];
+        let len = codec.encode(&tone(0), &mut packet);
+        assert!(len > 0, "编码失败");
+
+        let mut buffer = JitterBuffer::new().expect("构造抖动缓冲");
+        buffer
+            .push(0, 100_000, &packet[..len])
+            .expect("首包应当被接受");
+        // 前跳 10 秒（480 000 样本），远超 MAX_TIMESTAMP_JUMP。
+        assert!(
+            matches!(
+                buffer.push(1, 100_000 + 480_000, &packet[..len]),
+                Err(NetEqError::InvalidTimestamp)
+            ),
+            "时间戳跳变没被拒收"
+        );
+        // 回跳 10 秒同样拒收（这是「包不属于本流」，不是乱序）。
+        assert!(
+            matches!(
+                buffer.push(2, 100_000_u32.wrapping_sub(480_000), &packet[..len]),
+                Err(NetEqError::InvalidTimestamp)
+            ),
+            "时间戳回跳没被拒收"
+        );
+        // 正常的 10 ms 步进与小幅乱序仍然放行。
+        buffer
+            .push(3, 100_480, &packet[..len])
+            .expect("正常步进应当被接受");
+        buffer
+            .push(2, 100_000, &packet[..len])
+            .expect("小幅回退（乱序）应当被接受");
     }
 
     #[test]
