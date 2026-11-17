@@ -124,6 +124,12 @@ pub struct JitterStats {
     pub packets_received: u64,
     /// 被判为「抖动尖峰」的次数。非零意味着目标延迟被抬过——长跑里它应当保持 0。
     pub jitter_peaks_found: u16,
+    /// 还排着队等解码的**包数**（不是样本数）。
+    ///
+    /// 这是漂移补偿该用的传感器：`buffered_samples` 把 `leftover_samples` 与
+    /// `leftover_time_stretched_samples` 也算了进去，而那两个在 NetEQ 做时间伸缩时会自己涨，
+    /// 拿它当反馈会形成正反馈（实测会一路跑到 10 % 的时间压缩）。包数不会。
+    pub packets_queued: u32,
 }
 
 /// 单个发送方的抖动缓冲。
@@ -233,6 +239,7 @@ impl JitterBuffer {
             buffer_flushes: stats.lifetime.buffer_flushes,
             packets_received: stats.lifetime.jitter_buffer_packets_received,
             jitter_peaks_found: stats.network.jitter_peaks_found,
+            packets_queued: stats.packets_awaiting_decode as u32,
         }
     }
 }

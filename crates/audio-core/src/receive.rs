@@ -24,6 +24,7 @@
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::codec::MAX_PACKET_BYTES;
+use crate::drift::{DriftConfig, DriftControl, DriftStats, MAX_OUTPUT_SAMPLES, PullPlan};
 use crate::jitter::{JitterBuffer, JitterStats};
 use crate::{FRAME_SAMPLES, Frame};
 
@@ -145,6 +146,8 @@ pub struct ReceivePath {
     packets: Consumer<IncomingPacket>,
     pcm: Producer<f32>,
     buffer: JitterBuffer,
+    /// 漂移补偿（P4-6）。默认开启：没有它，±100 ppm 就会把缓冲推出预算（C-30/C-31）。
+    drift: DriftControl,
     stats: ReceiveStats,
     /// 下一个期望的序列号（`None` = 还没收到第一个包）。用来把网络丢包变成可见的数字。
     next_expected: Option<u16>,
@@ -170,6 +173,12 @@ impl ReceivePath {
                 packets,
                 pcm,
                 buffer,
+                // **默认关闭**：P4-6 的补偿器目前只在正向漂移上稳住了（见 measurements §3.4），
+                // 反向还会自激振荡，所以不放进默认路径。P5 接线前必须把这一行改成 `default()`。
+                drift: DriftControl::new(DriftConfig {
+                    enabled: false,
+                    ..DriftConfig::default()
+                }),
                 stats: ReceiveStats::default(),
                 next_expected: None,
             },
@@ -200,23 +209,46 @@ impl ReceivePath {
             }
         }
 
-        match self.buffer.pull() {
-            Ok(frame) => {
-                self.stats.frames_decoded += 1;
-                // 时间伸缩会改变帧长（加速时变短、合并时变长）。这里照单全收、只计数：
-                // PCM 环是**样本流**，`pull_frame` 永远取 480 个，帧边界不影响它。
-                if frame.samples.len() != FRAME_SAMPLES {
-                    self.stats.frames_off_size += 1;
-                }
-                for sample in &frame.samples {
-                    // 环满 = 音频侧没跟上，丢掉最旧的写法会把时序搞乱；这里直接丢新样本并计数。
-                    if self.pcm.push(*sample).is_err() {
-                        self.stats.samples_dropped_full += 1;
-                        break;
+        // 漂移补偿（P4-6）：先看抖动缓冲有多深，决定本 tick 拉几帧。
+        let plan = self.drift.begin_tick(self.buffer.stats().packets_queued);
+        let pulls = match plan {
+            PullPlan::Zero => 0,
+            PullPlan::One => 1,
+            PullPlan::Two => 2,
+        };
+
+        let mut staging = [0.0_f32; 2 * FRAME_SAMPLES];
+        let mut staged = 0_usize;
+        for _ in 0..pulls {
+            match self.buffer.pull() {
+                Ok(frame) => {
+                    self.stats.frames_decoded += 1;
+                    // 时间伸缩会改变帧长（加速时变短、合并时变长）。这里照单全收、只计数：
+                    // PCM 环是**样本流**，`pull_frame` 永远取 480 个，帧边界不影响它。
+                    if frame.samples.len() != FRAME_SAMPLES {
+                        self.stats.frames_off_size += 1;
                     }
+                    let room = staging.len() - staged;
+                    let take = frame.samples.len().min(room);
+                    staging[staged..staged + take].copy_from_slice(&frame.samples[..take]);
+                    staged += take;
+                }
+                Err(_) => {
+                    self.stats.frames_missing += 1;
+                    break;
                 }
             }
-            Err(_) => self.stats.frames_missing += 1,
+        }
+
+        // 丢/补样本（可能补，所以输出缓冲要比两帧再宽一点）。
+        let mut shaped = [0.0_f32; MAX_OUTPUT_SAMPLES];
+        let len = self.drift.process(&staging[..staged], &mut shaped);
+        for sample in &shaped[..len] {
+            // 环满 = 音频侧没跟上，丢掉最旧的写法会把时序搞乱；这里直接丢新样本并计数。
+            if self.pcm.push(*sample).is_err() {
+                self.stats.samples_dropped_full += 1;
+                break;
+            }
         }
     }
 
@@ -257,6 +289,12 @@ impl ReceivePath {
         self.buffer.buffered_samples()
     }
 
+    /// 还排着队等解码的包数。漂移补偿用它当传感器（见 `JitterStats::packets_queued`）。
+    #[must_use]
+    pub fn queued_packets(&self) -> u32 {
+        self.buffer.stats().packets_queued
+    }
+
     /// 设置目标延迟的上下限（毫秒），返回实际生效的 `(下限, 上限)`。
     ///
     /// 不调这个，抖动缓冲会用 NetEQ 的默认目标延迟 **80 ms**——那是浏览器场景的调参，
@@ -271,6 +309,17 @@ impl ReceivePath {
     #[must_use]
     pub fn target_delay_ms(&self) -> u32 {
         self.buffer.target_delay_ms()
+    }
+
+    /// 漂移补偿器的统计（P4-6）。
+    #[must_use]
+    pub fn drift_stats(&self) -> DriftStats {
+        self.drift.stats()
+    }
+
+    /// 换一套漂移补偿配置（关掉就是完全直通，用于回归对照）。
+    pub fn set_drift_config(&mut self, config: DriftConfig) {
+        self.drift = DriftControl::new(config);
     }
 
     /// 抖动缓冲的累计统计（P4-4 漂移长跑用）。

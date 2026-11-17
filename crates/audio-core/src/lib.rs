@@ -24,6 +24,7 @@
 
 pub mod chain;
 pub mod codec;
+pub mod drift;
 pub mod jitter;
 pub mod mix;
 pub mod receive;
@@ -31,6 +32,7 @@ pub mod stages;
 
 pub use chain::{Chain, ChainBuildError, ChainDesc, ChainParseError, StageKind};
 pub use codec::{AudioCodec, CodecError, MAX_PACKET_BYTES, OpusCodec, OpusConfig};
+pub use drift::{DriftConfig, DriftControl, DriftStats, PullPlan};
 pub use mix::{MAX_TRACKS, MixControl, MixError, MixStats, Mixer, TrackSource};
 pub use stages::{Agc2, Crossfade, Highpass, Rnn, StageWorker, WorkerStage, WorkerStatsSnapshot};
 
