@@ -322,6 +322,7 @@ version = "0.0.0"
 dependencies = [
  "audio-core",
  "audio-io",
+ "hound",
  "rtrb",
  "serde",
  "serde_json",

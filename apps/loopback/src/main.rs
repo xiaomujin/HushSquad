@@ -32,10 +32,12 @@ const USAGE: &str = "\
   --buffer    设备缓冲（帧，如 128/256/480）；不给就用设备默认。调小可降延迟，代价是更容易 xrun\n\
   --amplitude 脉冲振幅（0–0.95），默认 0.7；怕吵就先给 0.2 探一下\n\
   --single    只发一个脉冲（在 0.5 s 处）：没有周期歧义，结果唯一，推荐先用它\n\
-  --impulse   播放已知脉冲串并用麦克风录回，互相关求环回延迟（外放时才有声学路径）\n";
+  --repeat    连测 N 次并给出中位数与极差（默认 1）；重复性比单次读数更能说明问题\n\
+  --dump      把录音写成 WAV（排查「两个峰」这类问题时唯一能定案的手段）\n\
+  --impulse   播放已知脉冲串并用麦克风录回，匹配滤波求环回延迟（外放时才有声学路径）\n";
 
 /// 一次会话的统计。
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct SessionReport {
     mode: String,
     input: Option<String>,
@@ -55,19 +57,34 @@ struct SessionReport {
     delay_lag_samples: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     correlation: Option<f32>,
+    /// 抛物线插值后的亚样本位移（毫秒换算用它，`delay_ms` 已含）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delay_fractional_lag: Option<f64>,
+    /// 逐脉冲各自最佳位移的极差：单次测量内部的重复性。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    click_spread_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     uncertainty_ms: Option<f64>,
+    /// `--repeat` 的连测次数；只有 1 次时不写。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeats: Option<usize>,
+    /// 连测读数的极差（毫秒）：这才是能拿去签字的重复性。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delay_spread_ms: Option<f64>,
+    /// 每次的读数（按运行顺序），便于看出有没有单次离群。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_delays_ms: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capture_peak: Option<f32>,
     /// 实际推给播放设备的样本数（impulse 模式）。为 0 就说明根本没喂进去。
     #[serde(skip_serializing_if = "Option::is_none")]
     emitted_samples: Option<usize>,
-    /// 用两路回调时间戳算出的延迟（实验值：WASAPI 上两路 StreamInstant 原点不共享）。
+    /// 检测信噪比（峰值 ÷ 曲线中位数）：判断「到底有没有测到脉冲」的判据。
     #[serde(skip_serializing_if = "Option::is_none")]
-    delay_ms_stream_clock: Option<f64>,
-    /// 上述实验值的逐脉冲极差。
+    detection_snr: Option<f32>,
+    /// 相关法给出的位移。含流启动错位（实测 0.4–1.4 s），**不能当延迟读**。
     #[serde(skip_serializing_if = "Option::is_none")]
-    stream_clock_spread_ms: Option<f64>,
+    delay_ms_correlation: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     opus_frames: Option<u64>,
 }
@@ -108,10 +125,12 @@ struct Args {
     buffer: Option<u32>,
     impulse: bool,
     single: bool,
+    repeat: usize,
     period_ms: f64,
     amplitude: f32,
     codec: Codec,
     report: Option<PathBuf>,
+    dump: Option<PathBuf>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -124,10 +143,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         buffer: None,
         impulse: false,
         single: false,
+        repeat: 1,
         period_ms: 500.0,
         amplitude: 0.7,
         codec: Codec::None,
         report: None,
+        dump: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -163,6 +184,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             }
             "--impulse" => parsed.impulse = true,
             "--single" => parsed.single = true,
+            "--repeat" => {
+                parsed.repeat = take(args, &mut i, "--repeat")?
+                    .parse::<usize>()
+                    .map_err(|e| format!("--repeat 不是正整数：{e}"))?
+                    .max(1);
+            }
             "--codec" => {
                 let spec = take(args, &mut i, "--codec")?;
                 parsed.codec = if spec == "none" {
@@ -174,6 +201,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 };
             }
             "--report" => parsed.report = Some(PathBuf::from(take(args, &mut i, "--report")?)),
+            "--dump" => parsed.dump = Some(PathBuf::from(take(args, &mut i, "--dump")?)),
             other => return Err(format!("不认识参数 {other:?}")),
         }
         i += 1;
@@ -232,7 +260,11 @@ fn execute(parsed: &Args) -> Result<(), String> {
     }
 
     let report = if parsed.impulse {
-        run_impulse(parsed)?
+        if parsed.repeat > 1 {
+            run_impulse_repeated(parsed)?
+        } else {
+            run_impulse(parsed)?
+        }
     } else {
         run_passthrough(parsed)?
     };
@@ -350,11 +382,16 @@ fn session_passthrough(args: &Args) -> Result<SessionReport, String> {
         delay_ms: None,
         delay_lag_samples: None,
         correlation: None,
+        delay_fractional_lag: None,
+        click_spread_ms: None,
         uncertainty_ms: None,
+        repeats: None,
+        delay_spread_ms: None,
+        run_delays_ms: None,
         capture_peak: Some(capture.stats.peak()),
         emitted_samples: None,
-        delay_ms_stream_clock: None,
-        stream_clock_spread_ms: None,
+        detection_snr: None,
+        delay_ms_correlation: None,
         opus_frames: codec_frames.map(|frames| frames.load(Ordering::Relaxed)),
     };
 
@@ -511,6 +548,11 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         in_stamps.push(stamp);
     }
 
+    if let Some(path) = &args.dump {
+        write_wav(path, &recorded, sample_rate)?;
+        println!("录音已写入 {}", path.display());
+    }
+
     // 把流事件打印出来（设备被拔、格式失效都会走这里），别让它们静默消失。
     while let Ok(event) = rx.try_recv() {
         match event {
@@ -519,23 +561,23 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         }
     }
 
-    // 主算法：用两路回调时间戳（WASAPI 上都是 QPC）直接算「播放时刻 → 采集时刻」。
-    // 这样环形缓冲占用、流启动错位、回调抖动都不再进入结果。
-    let stamp_delay = compute_stamp_delay(
-        &train[..emitted_len.min(train.len())],
-        &recorded,
-        &out_stamps,
-        &in_stamps,
-        sample_rate,
-        period,
-    );
-
     let estimate = audio_io::impulse::estimate_delay(
         &recorded,
         &train[..emitted_len.min(train.len())],
         period,
         sample_rate,
     );
+
+    // 时间戳通道：把「发出去的那个样本」与「录到的那个样本」各自换算成回调墙钟再相减。
+    // 采集侧丢过样本时下标就对不上了，直接放弃这个值。
+    let dropped = capture.stats.dropped_samples.load(Ordering::Relaxed);
+    let stamp_result = estimate
+        .filter(|_| dropped == 0)
+        .and_then(|estimate| stamp_delay_of(&estimate, &out_stamps, &in_stamps, sample_rate));
+    let stamp_delay = stamp_result.map(|(delay, _, _)| delay);
+    if dropped > 0 {
+        eprintln!("采集侧丢了 {dropped} 个样本，录音下标与流序号不再对应，时间戳通道作废");
+    }
 
     // 不确定度 = 播放环占用的**波动范围** + 一个回调缓冲。
     // 恒定占用只是把延迟整体平移（已知量），波动才会让单个 lag 对不齐。
@@ -556,15 +598,19 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         xrun_events: capture.stats.xrun_events.load(Ordering::Relaxed)
             + playout.stats.xrun_events.load(Ordering::Relaxed),
         restarts: 0,
-        // 主值用相关法：它自带交叉验证（全局峰与最早强峰应当一致），不确定度可算。
-        delay_ms: estimate.map(|e| e.delay_ms),
+        // 主值走时间戳：不含我们自己的环形缓冲占用，也不含流启动错位。
+        delay_ms: stamp_delay,
         delay_lag_samples: estimate.map(|e| e.lag_samples),
         correlation: estimate.map(|e| e.correlation),
+        detection_snr: estimate.map(|e| e.detection_snr),
+        delay_fractional_lag: estimate.map(|e| e.fractional_lag),
+        click_spread_ms: estimate.map(|e| e.click_spread_ms),
+        // 相关法的绝对值含流启动错位（实测 0.4–1.4 s），只能当诊断。
+        delay_ms_correlation: estimate.map(|e| e.delay_ms),
+        repeats: None,
+        delay_spread_ms: None,
+        run_delays_ms: None,
         uncertainty_ms: Some(uncertainty_samples as f64 * 1000.0 / f64::from(sample_rate)),
-        // 时间戳法：cpal 的 StreamInstant 在 WASAPI 上两路原点不共享（实测差上百毫秒），
-        // 现在只能当实验值放这里，等共享时钟方案落地后再当主值。
-        delay_ms_stream_clock: stamp_delay.map(|(median, _)| median),
-        stream_clock_spread_ms: stamp_delay.map(|(_, spread)| spread),
         capture_peak: Some(capture.stats.peak()),
         emitted_samples: Some(emitted_len),
         opus_frames: None,
@@ -581,26 +627,67 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         recorded.len() as f64 / f64::from(sample_rate)
     );
 
-    match estimate {
-        Some(estimate) => {
-            println!(
-                "环回延迟 {:.2} ms（最早强峰 lag {} 样本，相关度 {:.3}，不确定度 ±{:.2} ms）",
-                estimate.delay_ms,
-                estimate.lag_samples,
-                estimate.correlation,
-                report.uncertainty_ms.unwrap_or(0.0)
+    // 时间戳自检：`stream_nanos` 是设备承诺的时刻，`wall_nanos` 是回调真正跑起来的时刻。
+    // 两者之差就是「这一批样本离真正播放/采集还有多久」，也就是设备缓冲深度。
+    let out_offset = median_offset(&out_stamps);
+    let in_offset = median_offset(&in_stamps);
+    println!(
+        "时间戳：输出 {} 条（playback−回调 {:+.1} ms），输入 {} 条（capture−回调 {:+.1} ms）",
+        out_stamps.len(),
+        out_offset,
+        in_stamps.len(),
+        in_offset
+    );
+
+    if let Some(estimate) = estimate {
+        print_stamp_pair(&estimate, &out_stamps, &in_stamps);
+    }
+    if let Some((_, t_play, t_capture)) = stamp_result {
+        let base = out_stamps
+            .first()
+            .map(|stamp| stamp.wall_nanos)
+            .unwrap_or(0)
+            .min(
+                in_stamps
+                    .first()
+                    .map(|stamp| stamp.wall_nanos)
+                    .unwrap_or(u64::MAX),
             );
-            if estimate.peak_lag_samples != estimate.lag_samples {
-                println!(
-                    "  参考：全局最高峰在 {:.2} ms（相关度 {:.3}），按多径反射忽略",
-                    estimate.peak_lag_samples as f64 * 1000.0 / f64::from(sample_rate),
-                    estimate.peak_correlation
-                );
-            }
+        println!(
+            "  时间轴（相对最早一条回调）：播放点击 +{:.1} ms，采集点击 +{:.1} ms，差 {:.1} ms",
+            (t_play - base) as f64 / 1_000_000.0,
+            (t_capture - base) as f64 / 1_000_000.0,
+            (t_capture - t_play) as f64 / 1_000_000.0
+        );
+    }
+
+    match (report.delay_ms, estimate) {
+        (Some(delay), Some(estimate)) => {
+            println!("环回延迟 {delay:.3} ms（时间戳法：播放回调 → 采集回调，含两端设备缓冲）");
+            println!(
+                "  匹配滤波：相关度 {:.3}，检测信噪比 {:.0}×，{} 个脉冲折叠，逐脉冲极差 {:.3} ms",
+                estimate.correlation,
+                estimate.detection_snr,
+                estimate.clicks,
+                estimate.click_spread_ms
+            );
+            println!(
+                "  参考：相关位移 {:.1} ms（含流启动错位，不能当延迟读）",
+                estimate.delay_ms
+            );
         }
-        None => {
+        (Some(delay), None) => {
+            println!("环回延迟 {delay:.3} ms（时间戳法；匹配滤波没找到脉冲，结果不可信）");
+        }
+        (None, Some(estimate)) => {
             eprintln!(
-                "没找到相关峰：录音峰值 {:.4}（−60 dBFS 以上才算有声）。检查麦克风是否静音、输出是否真的接到了这台设备的输入",
+                "时间戳通道没给出结果（录音或时间戳不完整）；相关位移 {:.1} ms 含流启动错位，不能当延迟读",
+                estimate.delay_ms
+            );
+        }
+        (None, None) => {
+            eprintln!(
+                "没测到脉冲：录音峰值 {:.4}（−60 dBFS 以上才算有声）。检查麦克风是否静音、输出是否真的接到了这台设备的输入",
                 report.capture_peak.unwrap_or(0.0)
             );
             let curve = audio_io::impulse::correlation_curve(
@@ -611,10 +698,10 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
             );
             let mut peaks: Vec<(usize, f32)> = curve.iter().copied().enumerate().collect();
             peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
-            eprintln!("相关度最高的 5 个位移（用于判断是没收到还是算法没对上）：");
+            eprintln!("分数最高的 5 个位移（判断是没收到还是算法没对上）：");
             for (lag, score) in peaks.iter().take(5) {
                 eprintln!(
-                    "  {:.2} ms  score {:.3}",
+                    "  {:.1} ms  score {:.3e}",
                     *lag as f64 * 1000.0 / f64::from(sample_rate),
                     score
                 );
@@ -622,6 +709,103 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         }
     }
     Ok(report)
+}
+
+/// --repeat：连测 N 次，报中位数与极差。
+///
+/// 单次读数证明不了任何事——旧实现三次给出 11.8 / 4.0 / 9.5 ms，任何一次拿出来看都像「合格」。
+/// 能不能签字取决于**极差**，所以把重复性做成工具的一部分，而不是靠人记得多跑几遍。
+fn run_impulse_repeated(args: &Args) -> Result<SessionReport, String> {
+    let mut runs: Vec<SessionReport> = Vec::with_capacity(args.repeat);
+    let mut readings: Vec<f64> = Vec::with_capacity(args.repeat);
+    for index in 0..args.repeat {
+        println!("—— 第 {}/{} 次 ——", index + 1, args.repeat);
+        let report = run_impulse(args)?;
+        if let Some(delay) = report.delay_ms {
+            readings.push(delay);
+        }
+        runs.push(report);
+    }
+    let mut merged = runs
+        .last()
+        .cloned()
+        .ok_or_else(|| "没有跑任何一次".to_owned())?;
+    if readings.is_empty() {
+        eprintln!("{0} 次都没测出延迟，无法给出中位数", args.repeat);
+        return Ok(merged);
+    }
+
+    let mut sorted = readings.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let spread = sorted[sorted.len() - 1] - sorted[0];
+
+    // 代表值取「离中位数最近的那一次」，这样 lag / 相关度 / 逐脉冲极差与中位数自洽，
+    // 而不是「最后一次碰巧是什么就写什么」。
+    if let Some(representative) = runs
+        .iter()
+        .filter(|run| run.delay_ms.is_some())
+        .min_by(|a, b| {
+            let left = (a.delay_ms.unwrap_or(0.0) - median).abs();
+            let right = (b.delay_ms.unwrap_or(0.0) - median).abs();
+            left.total_cmp(&right)
+        })
+        .cloned()
+    {
+        merged = representative;
+    }
+    merged.delay_ms = Some(median);
+    merged.repeats = Some(args.repeat);
+    merged.delay_spread_ms = Some(spread);
+    // 不确定度取「连测极差」与「单次逐脉冲极差」的较大者：前者管可重复性，后者管单次内部一致。
+    let click_spread = merged.click_spread_ms.unwrap_or(0.0);
+    merged.uncertainty_ms = Some(spread.max(click_spread));
+    merged.run_delays_ms = Some(readings.clone());
+
+    println!();
+    println!(
+        "{0} 次读数：{1:?}",
+        args.repeat,
+        readings
+            .iter()
+            .map(|value| format!("{value:.3}"))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "中位数 {:.3} ms，极差 {:.3} ms（最小 {:.3} / 最大 {:.3}）",
+        median,
+        spread,
+        sorted[0],
+        sorted[sorted.len() - 1]
+    );
+    Ok(merged)
+}
+
+/// 把录音写成 32-bit float 单声道 WAV。
+///
+/// 为什么需要它：相关法给出「两个几乎等高的峰」时（0.3 ms 与 766 ms），
+/// 只看数字无法判断哪个是直达声、哪个是伪峰，必须看波形本身。
+fn write_wav(path: &PathBuf, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("建目录 {} 失败：{e}", parent.display()))?;
+    }
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer =
+        hound::WavWriter::create(path, spec).map_err(|e| format!("建 WAV 失败：{e}"))?;
+    for sample in samples {
+        writer
+            .write_sample(*sample)
+            .map_err(|e| format!("写 WAV 失败：{e}"))?;
+    }
+    writer.finalize().map_err(|e| format!("收尾 WAV 失败：{e}"))
 }
 
 /// 把「推入环形缓冲的样本序号」换算成「回调墙钟」时间（纳秒）。
@@ -664,56 +848,90 @@ fn wall_time_of(stamps: &[audio_io::CallbackStamp], index: u64, sample_rate: u32
     })
 }
 
-/// 用两路回调时间戳算环回延迟：`采集时刻 − 播放时刻`，逐脉冲取中位数。
+/// 找出包含 `index` 的那条时间戳。
+fn find_stamp(stamps: &[audio_io::CallbackStamp], index: u64) -> Option<&audio_io::CallbackStamp> {
+    stamps
+        .iter()
+        .find(|stamp| index >= stamp.first_index && index < stamp.first_index + stamp.frames)
+}
+
+/// 把两端「设备承诺时刻」与「回调墙钟」的差打印出来：这就是设备缓冲深度。
 ///
-/// 这是唯一不含「我们自己的缓冲」的算法：播放侧用的是设备承诺的播放时刻
-/// （`OutputCallbackInfo::timestamp().playback`），采集侧用的是设备承诺的采集时刻
-/// （`InputCallbackInfo::timestamp().capture`），两者在 WASAPI 上同源于 QPC。
+/// 播放侧 `playback − callback` = 还要等多久才播到（含 WASAPI 引擎延迟）；
+/// 采集侧 `capture − callback` = 这批样本是多久以前采到的（负值）。
+fn print_stamp_pair(
+    estimate: &audio_io::impulse::DelayEstimate,
+    out_stamps: &[audio_io::CallbackStamp],
+    in_stamps: &[audio_io::CallbackStamp],
+) {
+    let describe = |label: &str, stamp: Option<&audio_io::CallbackStamp>| match stamp {
+        Some(stamp) => println!(
+            "  {label} stamp：first_index {}，frames {}，real_frames {}，设备时刻−回调 {:+.2} ms",
+            stamp.first_index,
+            stamp.frames,
+            stamp.real_frames,
+            (stamp.stream_nanos as f64 - stamp.wall_nanos as f64) / 1_000_000.0
+        ),
+        None => println!(
+            "  {label} stamp：没找到（索引 {}）",
+            if label == "播放" {
+                estimate.emitted_click_index
+            } else {
+                estimate.recorded_click_index
+            }
+        ),
+    };
+    describe(
+        "播放",
+        find_stamp(out_stamps, estimate.emitted_click_index as u64),
+    );
+    describe(
+        "采集",
+        find_stamp(in_stamps, estimate.recorded_click_index as u64),
+    );
+}
+
+/// 一批时间戳里 `stream_nanos − wall_nanos` 的中位数（毫秒）。
 ///
-/// 返回（中位数 ms, 逐脉冲极差 ms）；极差大说明脉冲配对错了或设备在丢样本。
-fn compute_stamp_delay(
-    emitted: &[f32],
-    recorded: &[f32],
+/// 输出侧是「还要等多久才真正播放」，输入侧是「这批样本是多久以前采到的」（负值）。
+/// 两者相加就是设备缓冲总量；用它把「端到端延迟」拆成「设备缓冲」与「声学/驱动」两部分。
+fn median_offset(stamps: &[audio_io::CallbackStamp]) -> f64 {
+    if stamps.is_empty() {
+        return f64::NAN;
+    }
+    let mut offsets: Vec<f64> = stamps
+        .iter()
+        .map(|stamp| (stamp.stream_nanos as f64 - stamp.wall_nanos as f64) / 1_000_000.0)
+        .collect();
+    offsets.sort_by(f64::total_cmp);
+    offsets[offsets.len() / 2]
+}
+
+/// 用两路回调时间戳算环回延迟：`采集回调墙钟 − 播放回调墙钟`。
+///
+/// 为什么这条路才是主值：
+///
+/// 1. 相关法的 lag 是「录音数组下标 − 发射数组下标」，而两个流**不是同时开始的**——
+///    实测播放流的首个回调比采集流晚 0.4–1.4 s，这个错位直接进 lag，让绝对值完全不可用。
+///    时间戳法把两个样本各自换算成同一根墙钟轴上的时刻，错位自动抵消。
+/// 2. 播放侧用的是「这个样本被交给设备的时刻」，采集侧是「这个样本被交给我们的时刻」，
+///    两者之差 = 两端设备缓冲 + 声学传播，正是端到端延迟要量的东西；
+///    我们自己的环形缓冲占用（`pump_impulse` 里维持的半满）不在其中。
+///
+/// 前提：采集侧没有丢样本，这样「录音数组下标」才等于「采集流样本序号」。
+/// 丢过就必须放弃这个值——宁可没有数，也不要一个偏移过的数。
+fn stamp_delay_of(
+    estimate: &audio_io::impulse::DelayEstimate,
     out_stamps: &[audio_io::CallbackStamp],
     in_stamps: &[audio_io::CallbackStamp],
     sample_rate: u32,
-    period: usize,
-) -> Option<(f64, f64)> {
-    let emitted_peak = emitted.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()));
-    let recorded_peak = recorded.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()));
-    if emitted_peak < 1e-3 || recorded_peak < 1e-3 {
+) -> Option<(f64, u64, u64)> {
+    let t_play = play_time_of(out_stamps, estimate.emitted_click_index as u64, sample_rate)?;
+    let t_capture = wall_time_of(in_stamps, estimate.recorded_click_index as u64, sample_rate)?;
+    if t_capture <= t_play {
         return None;
     }
-    let emitted_clicks =
-        audio_io::impulse::click_positions(emitted, emitted_peak * 0.5, period / 2);
-    let recorded_clicks =
-        audio_io::impulse::click_positions(recorded, recorded_peak * 0.3, period / 2);
-    let pairs = emitted_clicks.len().min(recorded_clicks.len());
-    if pairs == 0 {
-        return None;
-    }
-
-    let mut delays: Vec<f64> = Vec::with_capacity(pairs);
-    for index in 0..pairs {
-        let Some(t_play) = play_time_of(out_stamps, emitted_clicks[index] as u64, sample_rate)
-        else {
-            continue;
-        };
-        let Some(t_capture) = wall_time_of(in_stamps, recorded_clicks[index] as u64, sample_rate)
-        else {
-            continue;
-        };
-        if t_capture > t_play {
-            delays.push((t_capture - t_play) as f64 / 1_000_000.0);
-        }
-    }
-    if delays.is_empty() {
-        return None;
-    }
-    delays.sort_by(f64::total_cmp);
-    let median = delays[delays.len() / 2];
-    let spread = delays[delays.len() - 1] - delays[0];
-    Some((median, spread))
+    Some(((t_capture - t_play) as f64 / 1_000_000.0, t_play, t_capture))
 }
 
 /// 推送脉冲串并录音，返回（已推送样本数, 录音）。

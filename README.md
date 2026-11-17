@@ -8,7 +8,9 @@
 ## 当前状态
 
 **P0 完成**：工作区骨架、依赖纪律、门禁脚本已落地（门禁全绿）。
-**P1 完成**：离线直通链路 + 测量工具已落地——`testkit run` 能出 encode/decode 的 p50/p95/max，热路径分配数由机器验证为 0。下一步 P2（桌面实时 I/O）。
+**P1 完成**：离线直通链路 + 测量工具已落地——`testkit run` 能出 encode/decode 的 p50/p95/max，热路径分配数由机器验证为 0。
+
+**P2 进行中**：`audio-io` 与 `loopback` 已落地，物理环回延迟测出真值——**本机默认设备 198.3 ms，D1 预算 ≤15 ms，不达标**，根因在输出设备的音效链（APO）而非我们的代码。下一步做 WASAPI 独占模式绕过它。
 
 | 阶段 | 状态 |
 |---|---|
@@ -105,15 +107,23 @@ cargo run -p loopback -- --list-devices
 # 直通：采集 → rtrb → 播放（会出声，注意回授）
 cargo run -p loopback --release -- --seconds 10 --ring-ms 10 --report out/loopback.json
 
-# 环回延迟（D1）：播放脉冲串 + 麦克风录回，互相关求延迟
-cargo run -p loopback --release -- --impulse --period-ms 500 --seconds 10 \
-    --input "USB Condenser Microphone" --output "TOPPING USB DAC" --report out/impulse.json
+# 环回延迟（D1）：播放一个 1 ms 脉冲 + 麦克风录回，匹配滤波定位 + 回调时间戳换算
+cargo run -p loopback --release -- --impulse --single --seconds 3 --repeat 5 \
+    --report out/impulse.json
 ```
 
 `--buffer <帧>` 是设备缓冲的请求值（如 128/256/480），调小降延迟、更容易 xrun；不给就用设备默认。
+**共享模式下它不改变实测延迟**（本机 128 与 480 差 0.16 ms），别指望靠调小它救延迟。
 
-`--impulse` 的数字带 `uncertainty_ms`（来自播放环实测占用 + 一个回调缓冲，默认几十毫秒），只能当量级参考；
-要压到 ±2 ms 以内需要用 cpal 回调时间戳跨流比较（P2-3 的后续）。
+`--single` 只发一个脉冲（没有周期歧义）；`--repeat N` 连测 N 次并给出中位数与极差；
+`--dump out/rec.wav` 把录音写成 WAV（排查「两个峰」这类问题的唯一手段）。
+
+`--impulse` 的主值是**时间戳法**：把「发出去的那个样本」和「录到的那个样本」各自换算成同一根回调墙钟再相减，
+因此不含我们自己的环形缓冲占用，也不含两个流的启动错位。
+`delay_ms_correlation` 是相关法的位移，含流启动错位（本机 0.4–1.4 s），**只能当诊断**。
+
+> 本机实测：默认设备环回延迟 **198.3 ms**（n=5，极差 0.39 ms），D1 预算 ≤15 ms → **不达标**；
+> 瓶颈在输出设备的音效链（WASAPI 自己只承认 43 ms），见 `docs/measurements.md` §1.1 与结论 C-05/C-06。
 ## 明确不做
 
 浏览器 Web 端、视频、MCU 服务端混音（v1）、P2P/NAT 打洞（v1）、完整 WebRTC ICE/SDP、Mumble 客户端互通。
