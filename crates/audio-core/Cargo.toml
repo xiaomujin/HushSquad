@@ -23,6 +23,8 @@ sonora-simd.workspace = true
 nnnoiseless = { workspace = true, default-features = false }
 # 抖动缓冲（NetEQ 移植）。**必须关默认 feature**：默认的 `native` 会拉进 cpal/clap/axum/tokio/
 # tower/env_logger/rand/ropus。关掉后只剩缓冲与时间伸缩，见 crates-选型验证报告 §2.6。
+# 无锁 SPSC 环：抖动缓冲与音频线程之间的交接。构造期分配，热路径零分配。
+rtrb.workspace = true
 neteq = { workspace = true, default-features = false }
 # DFN3 质量档：模型（8.4 MB ONNX）与 tract 推理都随包进来，所以**非默认 feature**。
 # 选型见 crates-选型验证报告 §2.3；ARM 推理性能是未验证项（D5）。

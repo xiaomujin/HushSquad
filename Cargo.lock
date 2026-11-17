@@ -51,6 +51,7 @@ dependencies = [
  "neteq",
  "nnnoiseless",
  "opus",
+ "rtrb",
  "sonora-agc2",
  "sonora-simd",
 ]

@@ -25,6 +25,7 @@
 pub mod chain;
 pub mod codec;
 pub mod jitter;
+pub mod receive;
 pub mod stages;
 
 pub use chain::{Chain, ChainBuildError, ChainDesc, ChainParseError, StageKind};

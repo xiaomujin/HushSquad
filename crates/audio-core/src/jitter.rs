@@ -135,6 +135,19 @@ impl JitterBuffer {
     pub fn target_delay_ms(&self) -> u32 {
         self.neteq.target_delay_ms()
     }
+
+    /// 设置目标延迟的下限（毫秒），返回生效值。
+    pub fn set_minimum_delay(&mut self, delay_ms: u32) -> u32 {
+        self.neteq.set_minimum_delay(delay_ms)
+    }
+
+    /// 设置目标延迟的上限（毫秒），返回生效值。
+    ///
+    /// **必须用**：NetEQ 的默认目标延迟是 **80 ms**（浏览器场景的调参），而我们的延迟预算
+    /// （附录 A 第 9 行）是 L1 10–15 ms、L2 15–20 ms。不压上限，L1 档从抖动缓冲这一步就超预算。
+    pub fn set_maximum_delay(&mut self, delay_ms: u32) -> u32 {
+        self.neteq.set_maximum_delay(delay_ms)
+    }
 }
 
 #[cfg(test)]
@@ -181,10 +194,27 @@ mod tests {
     }
 
     #[test]
-    fn buffer_reports_a_target_delay() {
+    fn default_target_delay_is_far_above_our_budget() {
+        // 钉住一个必须处理的事实：NetEQ 的默认目标延迟是 80 ms（浏览器调参），
+        // 而附录 A 第 9 行的预算是 L1 10–15 ms / L2 15–20 ms。
         let buffer = JitterBuffer::new().expect("构造抖动缓冲");
-        // NetEQ 的起始目标延迟是 80 ms（库的 kStartDelayMs）。这里只钉住「不是 0、也不是瞎值」。
-        assert!(buffer.target_delay_ms() > 0, "目标延迟不该是 0");
+        assert_eq!(
+            buffer.target_delay_ms(),
+            80,
+            "库的默认值变了，需要重新核对预算"
+        );
         assert_eq!(buffer.buffered_ms(), 0, "空缓冲的深度应为 0");
+    }
+
+    #[test]
+    fn maximum_delay_can_be_clamped_into_budget() {
+        let mut buffer = JitterBuffer::new().expect("构造抖动缓冲");
+        let applied = buffer.set_maximum_delay(20);
+        assert!(applied <= 20, "上限没生效：{applied}");
+        assert!(
+            buffer.target_delay_ms() <= 20,
+            "目标延迟仍是 {} ms，压不进预算",
+            buffer.target_delay_ms()
+        );
     }
 }
