@@ -181,6 +181,11 @@ struct Args {
     exclusive_rate: Option<u32>,
     /// 独占模式的取用方式：auto（先事件后轮询）/ event / poll。
     exclusive_mode: exclusive::ExclusiveMode,
+    /// 共享模式下的渲染采样率（默认跟随采集）。
+    ///
+    /// 用途：回环采集被锁在端点混音格式（本机 192 kHz），把它设成 48 kHz 就能单独量出
+    /// 「引擎 48→192 重采样」到底值多少毫秒——这是那 ~141 ms 唯一还没排除的嫌疑。
+    render_rate: Option<u32>,
     single: bool,
     repeat: usize,
     period_ms: f64,
@@ -203,6 +208,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         loopback: false,
         exclusive_rate: None,
         exclusive_mode: exclusive::ExclusiveMode::Auto,
+        render_rate: None,
         single: false,
         repeat: 1,
         period_ms: 500.0,
@@ -246,6 +252,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--impulse" => parsed.impulse = true,
             "--exclusive" => parsed.exclusive = true,
             "--loopback" => parsed.loopback = true,
+            "--render-rate" => {
+                parsed.render_rate = Some(
+                    take(args, &mut i, "--render-rate")?
+                        .parse()
+                        .map_err(|e| format!("--render-rate 不是整数：{e}"))?,
+                );
+            }
             "--exclusive-mode" => {
                 let value = take(args, &mut i, "--exclusive-mode")?;
                 parsed.exclusive_mode = match value.as_str() {
@@ -603,9 +616,17 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     }
     .map_err(|e| e.to_string())?;
     let sample_rate = capture.format.sample_rate;
-    // 诊断开关：独占渲染强行用另一个采样率，只为判断「设备到底在不在消费」。
-    let render_rate = args.exclusive_rate.unwrap_or(sample_rate);
-    let rate_mismatch = args.exclusive && render_rate != sample_rate;
+    // 渲染采样率：独占模式用 --exclusive-rate 强行指定（诊断「设备在不在消费」）；
+    // 共享模式用 --render-rate（诊断「引擎重采样值多少毫秒」）；都不给就跟随采集。
+    let render_rate = args
+        .exclusive_rate
+        .or(args.render_rate)
+        .unwrap_or(sample_rate);
+    // 两种不一致要分开处理：
+    // - 独占 + --exclusive-rate：只为看设备在不在消费，延迟读数作废；
+    // - --render-rate：是「引擎重采样值多少毫秒」的正经实验，读数有效（录音会抽取后分析）。
+    let exclusive_rate_mismatch = args.exclusive && render_rate != sample_rate;
+    let rate_mismatch = render_rate != sample_rate;
     let playout = if args.exclusive {
         Playout::Exclusive(exclusive::start(
             playout_consumer,
@@ -624,9 +645,9 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
                 tx,
                 args.buffer,
                 Some(stamp_out_tx),
-                // 跟随采集侧的采样率：回环模式下采集被锁在端点混音格式（本机 192 kHz），
-                // 渲染必须跟着走，否则两边的样本下标没法对齐。
-                sample_rate,
+                // 回环模式下采集被锁在端点混音格式（本机 192 kHz），而 --render-rate 可以
+                // 让它故意不同——那正是「引擎重采样值多少毫秒」的实验。
+                render_rate,
             )
             .map_err(|e| e.to_string())?,
         )
@@ -640,11 +661,19 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
                 playout.sample_rate()
             ));
         }
-        eprintln!(
-            "⚠ 诊断模式：渲染 {} Hz 与采集 {} Hz 不一致，延迟读数作废，只看「已填缓冲」有没有增长",
-            playout.sample_rate(),
-            sample_rate
-        );
+        if exclusive_rate_mismatch {
+            eprintln!(
+                "⚠ 诊断模式：渲染 {} Hz 与采集 {} Hz 不一致，延迟读数作废，只看「已填缓冲」有没有增长",
+                playout.sample_rate(),
+                sample_rate
+            );
+        } else {
+            eprintln!(
+                "渲染 {} Hz / 采集 {} Hz：录音会抽取到渲染采样率再分析（用来量引擎重采样的代价）",
+                playout.sample_rate(),
+                sample_rate
+            );
+        }
     }
 
     if let Playout::Exclusive(render) = &playout {
@@ -661,20 +690,21 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         println!("  格式协商：{}", render.format.negotiation);
     }
 
-    let total = (args.seconds.max(0.1) * f64::from(sample_rate)) as usize;
+    // 发射序列必须按**渲染**采样率生成：它要按设备的节奏播出去。
+    let total = (args.seconds.max(0.1) * f64::from(render_rate)) as usize;
     let amplitude = args.amplitude.clamp(0.0, 0.95);
     // 单次脉冲：周期取整段长度 ⇒ 只有一个脉冲；再旋到 0.5 s 处，前后都留余量。
     // 周期脉冲串做互相关有「延迟 mod 周期」的歧义，实测会在 4 / 23 / 443 ms 之间乱跳。
     let (period, train) = if args.single {
-        let mut single = audio_io::impulse::click_train(total, total, sample_rate, amplitude);
+        let mut single = audio_io::impulse::click_train(total, total, render_rate, amplitude);
         let shift = ((0.5 * f64::from(sample_rate)) as usize).min(total.saturating_sub(1));
         single.rotate_right(shift);
         (total, single)
     } else {
-        let period = ((args.period_ms / 1000.0 * f64::from(sample_rate)) as usize).max(1);
+        let period = ((args.period_ms / 1000.0 * f64::from(render_rate)) as usize).max(1);
         (
             period,
-            audio_io::impulse::click_train(total, period, sample_rate, amplitude),
+            audio_io::impulse::click_train(total, period, render_rate, amplitude),
         )
     };
 
@@ -711,7 +741,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
             ));
         }
     }
-    if rate_mismatch {
+    if exclusive_rate_mismatch {
         return Err("诊断模式结束：渲染与采集采样率不一致，不产出延迟读数".to_owned());
     }
 
@@ -738,19 +768,43 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         }
     }
 
+    // 渲染与采集采样率不同时（回环采集被锁在端点混音格式），把录音按整数倍抽取回渲染采样率，
+    // 这样发射序列与录音落在同一个采样率上，匹配滤波才有意义。
+    let ratio = if sample_rate == render_rate {
+        1
+    } else if sample_rate % render_rate == 0 {
+        (sample_rate / render_rate) as usize
+    } else {
+        return Err(format!(
+            "采集 {sample_rate} Hz 与渲染 {render_rate} Hz 不是整数倍关系，没法对齐分析"
+        ));
+    };
+    let analysis = if ratio == 1 {
+        recorded.clone()
+    } else {
+        decimate(&recorded, ratio)
+    };
+
     let estimate = audio_io::impulse::estimate_delay(
-        &recorded,
+        &analysis,
         &train[..emitted_len.min(train.len())],
         period,
-        sample_rate,
+        render_rate,
     );
 
     // 时间戳通道：把「发出去的那个样本」与「录到的那个样本」各自换算成回调墙钟再相减。
     // 采集侧丢过样本时下标就对不上了，直接放弃这个值。
     let dropped = capture.stats.dropped_samples.load(Ordering::Relaxed);
-    let stamp_result = estimate
-        .filter(|_| dropped == 0)
-        .and_then(|estimate| stamp_delay_of(&estimate, &out_stamps, &in_stamps, sample_rate));
+    let stamp_result = estimate.filter(|_| dropped == 0).and_then(|estimate| {
+        stamp_delay_of(
+            &estimate,
+            &out_stamps,
+            &in_stamps,
+            render_rate,
+            sample_rate,
+            ratio,
+        )
+    });
     let stamp_delay = stamp_result.map(|(delay, _, _)| delay);
     if dropped > 0 {
         eprintln!("采集侧丢了 {dropped} 个样本，录音下标与流序号不再对应，时间戳通道作废");
@@ -787,7 +841,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
         repeats: None,
         delay_spread_ms: None,
         run_delays_ms: None,
-        uncertainty_ms: Some(uncertainty_samples as f64 * 1000.0 / f64::from(sample_rate)),
+        uncertainty_ms: Some(uncertainty_samples as f64 * 1000.0 / f64::from(render_rate)),
         capture_peak: Some(capture.stats.peak()),
         emitted_samples: Some(emitted_len),
         opus_frames: None,
@@ -799,7 +853,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
 
     println!(
         "已推送 {:.2} s 脉冲到播放设备（欠载 {} 样本），录音 {:.2} s",
-        emitted_len as f64 / f64::from(sample_rate),
+        emitted_len as f64 / f64::from(render_rate),
         underruns,
         recorded.len() as f64 / f64::from(sample_rate)
     );
@@ -819,7 +873,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     );
 
     if let Some(estimate) = estimate {
-        print_stamp_pair(&estimate, &out_stamps, &in_stamps, epoch_ns);
+        print_stamp_pair(&estimate, &out_stamps, &in_stamps, epoch_ns, ratio);
     }
     if let Some((_, t_play, t_capture)) = stamp_result {
         let base = out_stamps
@@ -960,6 +1014,18 @@ fn run_impulse_repeated(args: &Args) -> Result<SessionReport, String> {
     Ok(merged)
 }
 
+/// 按整数倍抽取（box 平均）。
+///
+/// 为什么可以这么粗暴：脉冲是 1 ms 的 1 kHz 正弦，抽取后形状仍然可用；
+/// 这里只关心时移，不关心高频细节。
+fn decimate(samples: &[f32], ratio: usize) -> Vec<f32> {
+    let divisor = ratio as f32;
+    samples
+        .chunks_exact(ratio)
+        .map(|chunk| chunk.iter().sum::<f32>() / divisor)
+        .collect()
+}
+
 /// 把录音写成 32-bit float 单声道 WAV。
 ///
 /// 为什么需要它：相关法给出「两个几乎等高的峰」时（0.3 ms 与 766 ms），
@@ -1043,6 +1109,7 @@ fn print_stamp_pair(
     out_stamps: &[audio_io::CallbackStamp],
     in_stamps: &[audio_io::CallbackStamp],
     epoch_ns: i128,
+    in_scale: usize,
 ) {
     let describe = |label: &str, stamp: Option<&audio_io::CallbackStamp>| match stamp {
         Some(stamp) => println!(
@@ -1066,9 +1133,13 @@ fn print_stamp_pair(
         "播放",
         find_stamp(out_stamps, estimate.emitted_click_index as u64),
     );
+    // 录音下标是按渲染采样率算出来的，采集时间戳用的是采集采样率的下标。
     describe(
         "采集",
-        find_stamp(in_stamps, estimate.recorded_click_index as u64),
+        find_stamp(
+            in_stamps,
+            estimate.recorded_click_index as u64 * in_scale as u64,
+        ),
     );
 }
 
@@ -1108,10 +1179,14 @@ fn stamp_delay_of(
     estimate: &audio_io::impulse::DelayEstimate,
     out_stamps: &[audio_io::CallbackStamp],
     in_stamps: &[audio_io::CallbackStamp],
-    sample_rate: u32,
+    out_rate: u32,
+    in_rate: u32,
+    in_scale: usize,
 ) -> Option<(f64, u64, u64)> {
-    let t_play = play_time_of(out_stamps, estimate.emitted_click_index as u64, sample_rate)?;
-    let t_capture = wall_time_of(in_stamps, estimate.recorded_click_index as u64, sample_rate)?;
+    let t_play = play_time_of(out_stamps, estimate.emitted_click_index as u64, out_rate)?;
+    // 录音下标是按渲染采样率算的，换算回采集采样率的下标才能对上时间戳。
+    let captured_index = estimate.recorded_click_index as u64 * in_scale as u64;
+    let t_capture = wall_time_of(in_stamps, captured_index, in_rate)?;
     if t_capture <= t_play {
         return None;
     }
