@@ -166,34 +166,6 @@ pub fn estimate_delay(
     })
 }
 
-/// 找出信号里所有脉冲的位置（越阈后在其后 1 ms 内取峰值）。
-///
-/// 取「峰」而不是「首个越阈样本」：越阈点取决于振幅与噪声，峰是波形特征，抖动小一个量级。
-#[must_use]
-pub fn click_positions(signal: &[f32], threshold: f32, min_spacing: usize) -> Vec<usize> {
-    let mut positions = Vec::new();
-    let search = 48.min(signal.len()); // 1 ms
-    let mut index = 0;
-    while index < signal.len() {
-        if signal[index].abs() <= threshold {
-            index += 1;
-            continue;
-        }
-        let end = (index + search).min(signal.len());
-        let mut best = index;
-        let mut best_value = signal[index].abs();
-        for (offset, sample) in signal[index..end].iter().enumerate() {
-            if sample.abs() > best_value {
-                best_value = sample.abs();
-                best = index + offset;
-            }
-        }
-        positions.push(best);
-        index = best + min_spacing.max(1);
-    }
-    positions
-}
-
 /// 一次分析的中间产物：折叠后的相关度曲线、各脉冲起点、模板本身。
 struct Curve {
     scores: Vec<f32>,
@@ -213,7 +185,8 @@ fn analyze(recorded: &[f32], emitted: &[f32], max_lag: usize, sample_rate: u32) 
     let template_len = click_len(sample_rate);
     let onsets = click_onsets(emitted, max_lag, template_len, MAX_CLICKS)?;
     let first = onsets[0];
-    // 去掉模板的直流分量：脉冲是单极性的（半正弦 × 正包络），而录音里几乎总有一个直流偏置。
+    // 去掉模板的直流分量：波形本身已经是零均值的（汉宁 × 整周期正弦），这一步是保险——
+    // 万一日后换了脉冲形状，直流偏置不至于又悄悄把判据压掉一个数量级。
     // 不去掉的话「一段常数」会和模板的直流部分对齐，把检测信噪比压掉一个数量级。
     let mut template = emitted.get(first..first + template_len)?.to_vec();
     let template_mean = template.iter().map(|s| f64::from(*s)).sum::<f64>() / template.len() as f64;
@@ -480,7 +453,7 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert!(!peaks.is_empty());
-        // 半正弦载波从 0 起，所以第一个越阈样本落在脉冲开头几毫秒内，而不是正好 0。
+        // 正弦从 0 起，所以第一个越阈样本落在脉冲开头几毫秒内，而不是正好 0。
         assert!(
             peaks[0] < 48,
             "第一个脉冲应在开头 1 ms 内，实际 {}",
