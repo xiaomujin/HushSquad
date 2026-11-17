@@ -84,6 +84,48 @@ impl AudioDecoder for OpusDecoderAdapter {
 /// 网络线程上，panic 等于断音。拒收一个荒唐的包比赌它不出事便宜得多。
 pub const MAX_TIMESTAMP_JUMP: u32 = 48_000 * 5;
 
+/// 抖动缓冲的累计统计快照（P4-4 用）。
+///
+/// 只把**我们关心的**几项抄出来，不把 `neteq::NetEqStats` 直接漏到公开 API 上：那个结构
+/// 里十几个字段的口径随上游版本变，泄漏出去等于给自己钉死一个外部类型。
+///
+/// 字段全部是**累计值**（除缓冲深度与目标延迟），所以长跑里「末次读数 − 首次读数」就是
+/// 这 4 小时里发生过多少时间伸缩。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JitterStats {
+    /// 当前缓冲深度（毫秒）。不是累计值。
+    pub buffered_ms: u32,
+    /// 当前缓冲深度（样本）。不是累计值。
+    ///
+    /// 要这个是因为 `buffered_ms` 是整数毫秒：目标延迟被夹在 15–20 ms，1 ms 的分辨率
+    /// 会把「漂移正在被吸收」的过程糊成一堵墙。480 样本 = 10 ms，所以 1 ms = 48 样本。
+    pub buffered_samples: u32,
+    /// 当前目标延迟（毫秒）。不是累计值。
+    pub target_delay_ms: u32,
+    /// 被**时间压缩**吃掉的样本数（发送方快了，缓冲涨了）。
+    pub removed_samples_for_acceleration: u64,
+    /// 被**时间拉伸**补进去的样本数（发送方慢了，缓冲见底）。
+    pub inserted_samples_for_deceleration: u64,
+    /// PLC 外推出来的样本数。
+    ///
+    /// **这是上界，不是精确值**：`neteq` 把 Expand 的整个输出帧都记成隐藏样本，而 Expand 实际
+    /// 会先吃掉一部分真音频、只外推剩下的一小段。P4-4 实测高报 25 %（自报 93 120，按样本守恒
+    /// 推导 68 928）。要用它做账，只能当「造出来的样本数」的**上限**（C-32）。
+    pub concealed_samples: u64,
+    /// 其中「静音隐藏」的样本数（外推到静音，说明本来就没声音）。
+    pub silent_concealed_samples: u64,
+    /// PLC 事件次数。
+    pub concealment_events: u64,
+    /// 迟到被丢掉的包数。
+    pub late_packets_discarded: u64,
+    /// 缓冲被清空的次数（每次清空都是一次可听的断裂）。
+    pub buffer_flushes: u64,
+    /// 进过缓冲的包数。
+    pub packets_received: u64,
+    /// 被判为「抖动尖峰」的次数。非零意味着目标延迟被抬过——长跑里它应当保持 0。
+    pub jitter_peaks_found: u16,
+}
+
 /// 单个发送方的抖动缓冲。
 pub struct JitterBuffer {
     neteq: NetEq,
@@ -143,6 +185,15 @@ impl JitterBuffer {
         self.neteq.current_buffer_size_ms()
     }
 
+    /// 当前缓冲深度（样本）。
+    ///
+    /// 比 [`JitterBuffer::buffered_ms`] 细 48 倍：目标延迟被夹在 15–20 ms 时，整数毫秒
+    /// 会把「漂移正在被吸收」的过程糊成一堵墙。
+    #[must_use]
+    pub fn buffered_samples(&self) -> u32 {
+        self.neteq.current_buffer_size_samples() as u32
+    }
+
     /// 目标延迟（毫秒）。
     #[must_use]
     pub fn target_delay_ms(&self) -> u32 {
@@ -160,6 +211,29 @@ impl JitterBuffer {
     /// （附录 A 第 9 行）是 L1 10–15 ms、L2 15–20 ms。不压上限，L1 档从抖动缓冲这一步就超预算。
     pub fn set_maximum_delay(&mut self, delay_ms: u32) -> u32 {
         self.neteq.set_maximum_delay(delay_ms)
+    }
+
+    /// 累计统计快照（P4-4 漂移长跑用）。
+    ///
+    /// 会克隆几个小结构体（`NetEqStats` 里没有 `Vec`，但 `NetworkStatistics` 也不是 `Copy`），
+    /// 所以**不要**在音频回调里每帧调它：网络线程每秒一次就够。
+    #[must_use]
+    pub fn stats(&self) -> JitterStats {
+        let stats = self.neteq.get_statistics();
+        JitterStats {
+            buffered_ms: stats.current_buffer_size_ms,
+            buffered_samples: self.neteq.current_buffer_size_samples() as u32,
+            target_delay_ms: stats.target_delay_ms,
+            removed_samples_for_acceleration: stats.lifetime.removed_samples_for_acceleration,
+            inserted_samples_for_deceleration: stats.lifetime.inserted_samples_for_deceleration,
+            concealed_samples: stats.lifetime.concealed_samples,
+            silent_concealed_samples: stats.lifetime.silent_concealed_samples,
+            concealment_events: stats.lifetime.concealment_events,
+            late_packets_discarded: stats.lifetime.late_packets_discarded,
+            buffer_flushes: stats.lifetime.buffer_flushes,
+            packets_received: stats.lifetime.jitter_buffer_packets_received,
+            jitter_peaks_found: stats.network.jitter_peaks_found,
+        }
     }
 }
 

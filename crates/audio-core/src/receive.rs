@@ -24,7 +24,7 @@
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::codec::MAX_PACKET_BYTES;
-use crate::jitter::JitterBuffer;
+use crate::jitter::{JitterBuffer, JitterStats};
 use crate::{FRAME_SAMPLES, Frame};
 
 /// 一个入站包（固定大小，环里不分配）。
@@ -251,6 +251,12 @@ impl ReceivePath {
         self.buffer.buffered_ms()
     }
 
+    /// 抖动缓冲当前深度（样本）。漂移长跑每 100 ms 采一次，用这个比毫秒细。
+    #[must_use]
+    pub fn buffered_samples(&self) -> u32 {
+        self.buffer.buffered_samples()
+    }
+
     /// 设置目标延迟的上下限（毫秒），返回实际生效的 `(下限, 上限)`。
     ///
     /// 不调这个，抖动缓冲会用 NetEQ 的默认目标延迟 **80 ms**——那是浏览器场景的调参，
@@ -265,6 +271,15 @@ impl ReceivePath {
     #[must_use]
     pub fn target_delay_ms(&self) -> u32 {
         self.buffer.target_delay_ms()
+    }
+
+    /// 抖动缓冲的累计统计（P4-4 漂移长跑用）。
+    ///
+    /// 含「被时间压缩/拉伸的样本数」——这是判断「漂移到底有没有被吸收」的唯一直接证据：
+    /// 缓冲深度不变时，两者之差必须等于两端累计的样本数差，否则就是账没对上。
+    #[must_use]
+    pub fn jitter_stats(&self) -> JitterStats {
+        self.buffer.stats()
     }
 }
 
