@@ -174,8 +174,13 @@ struct Args {
     buffer: Option<u32>,
     impulse: bool,
     exclusive: bool,
+    /// 采集改成在**播放设备**上开回环（WASAPI loopback）：摘掉扬声器、空气和麦克风，
+    /// 只量「播放侧 + 数字回环」。
+    loopback: bool,
     /// 仅诊断用：把独占渲染强行开到指定采样率（与采集不一致时延迟读数作废）。
     exclusive_rate: Option<u32>,
+    /// 独占模式的取用方式：auto（先事件后轮询）/ event / poll。
+    exclusive_mode: exclusive::ExclusiveMode,
     single: bool,
     repeat: usize,
     period_ms: f64,
@@ -195,7 +200,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         buffer: None,
         impulse: false,
         exclusive: false,
+        loopback: false,
         exclusive_rate: None,
+        exclusive_mode: exclusive::ExclusiveMode::Auto,
         single: false,
         repeat: 1,
         period_ms: 500.0,
@@ -238,6 +245,20 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             }
             "--impulse" => parsed.impulse = true,
             "--exclusive" => parsed.exclusive = true,
+            "--loopback" => parsed.loopback = true,
+            "--exclusive-mode" => {
+                let value = take(args, &mut i, "--exclusive-mode")?;
+                parsed.exclusive_mode = match value.as_str() {
+                    "auto" => exclusive::ExclusiveMode::Auto,
+                    "event" => exclusive::ExclusiveMode::Event,
+                    "poll" => exclusive::ExclusiveMode::Poll,
+                    other => {
+                        return Err(format!(
+                            "未知 --exclusive-mode {other:?}（auto / event / poll）"
+                        ));
+                    }
+                };
+            }
             "--exclusive-rate" => {
                 parsed.exclusive_rate = Some(
                     take(args, &mut i, "--exclusive-rate")?
@@ -381,9 +402,15 @@ fn session_passthrough(args: &Args) -> Result<SessionReport, String> {
                 None,
             )
             .map_err(|e| e.to_string())?;
-            let playout =
-                audio_io::start_playout(args.output.as_deref(), consumer, tx, args.buffer, None)
-                    .map_err(|e| e.to_string())?;
+            let playout = audio_io::start_playout(
+                args.output.as_deref(),
+                consumer,
+                tx,
+                args.buffer,
+                None,
+                audio_io::PREFERRED_SAMPLE_RATE,
+            )
+            .map_err(|e| e.to_string())?;
             (capture, playout, None, None)
         }
         Codec::Opus => {
@@ -397,9 +424,15 @@ fn session_passthrough(args: &Args) -> Result<SessionReport, String> {
                 None,
             )
             .map_err(|e| e.to_string())?;
-            let playout =
-                audio_io::start_playout(args.output.as_deref(), consumer_b, tx, args.buffer, None)
-                    .map_err(|e| e.to_string())?;
+            let playout = audio_io::start_playout(
+                args.output.as_deref(),
+                consumer_b,
+                tx,
+                args.buffer,
+                None,
+                audio_io::PREFERRED_SAMPLE_RATE,
+            )
+            .map_err(|e| e.to_string())?;
             if !capture.is_48k() || !playout.is_48k() {
                 return Err(format!(
                     "Opus 路径要求 48 kHz（采集 {} Hz / 播放 {} Hz）；先换 48 kHz 设备或去掉 --codec",
@@ -535,6 +568,10 @@ fn spawn_opus_worker(
 
 /// `--impulse`：推已知脉冲串，同时录音，互相关求环回延迟。
 fn run_impulse(args: &Args) -> Result<SessionReport, String> {
+    // Windows 默认定时器精度 15.6 ms：`sleep(1ms)` 会睡成 15 ms。轮询模式按 15 ms 的节奏
+    // 补数据喂不动 6–10 ms 的设备缓冲，pump_impulse 也会供料不足（实测 3 s 欠载上千样本）。
+    // 整段测量期间把精度提到 1 ms，离开作用域自动还原。
+    let _timer = exclusive::TimerResolution::raise();
     let ring_samples = ring_capacity(args);
     let (tx, rx) = mpsc::channel();
     // 录音侧单独放大到 20 倍（默认 200 ms）：抽干是「每轮循环一次」，Windows 上两轮之间可能有 15 ms，
@@ -546,13 +583,24 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     let (stamp_out_tx, mut stamp_out_rx) = rtrb::RingBuffer::<audio_io::CallbackStamp>::new(8_192);
     let (stamp_in_tx, mut stamp_in_rx) = rtrb::RingBuffer::<audio_io::CallbackStamp>::new(8_192);
 
-    let capture = audio_io::start_capture(
-        args.input.as_deref(),
-        capture_producer,
-        tx.clone(),
-        args.buffer,
-        Some(stamp_in_tx),
-    )
+    // --loopback：采集改成在播放设备上开回环，把声学与麦克风整段摘掉。
+    let capture = if args.loopback {
+        audio_io::start_loopback_capture(
+            args.input.as_deref().or(args.output.as_deref()),
+            capture_producer,
+            tx.clone(),
+            args.buffer,
+            Some(stamp_in_tx),
+        )
+    } else {
+        audio_io::start_capture(
+            args.input.as_deref(),
+            capture_producer,
+            tx.clone(),
+            args.buffer,
+            Some(stamp_in_tx),
+        )
+    }
     .map_err(|e| e.to_string())?;
     let sample_rate = capture.format.sample_rate;
     // 诊断开关：独占渲染强行用另一个采样率，只为判断「设备到底在不在消费」。
@@ -566,6 +614,7 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
             render_rate,
             args.buffer,
             args.output.clone(),
+            args.exclusive_mode,
         )?)
     } else {
         Playout::Shared(
@@ -575,6 +624,9 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
                 tx,
                 args.buffer,
                 Some(stamp_out_tx),
+                // 跟随采集侧的采样率：回环模式下采集被锁在端点混音格式（本机 192 kHz），
+                // 渲染必须跟着走，否则两边的样本下标没法对齐。
+                sample_rate,
             )
             .map_err(|e| e.to_string())?,
         )
@@ -641,11 +693,11 @@ fn run_impulse(args: &Args) -> Result<SessionReport, String> {
     // 填充次数放在这里看才有意义：开流瞬间还是 0，跑完才知道渲染线程到底有没有被喂动。
     if let Playout::Exclusive(render) = &playout {
         let fills = render.fills.load(Ordering::Relaxed);
+        // 只报次数与上限：轮询模式下每次能拿到的可写帧数并不等于整块，
+        // 「次数 × 缓冲帧数」会算出一个比实际大好几倍的假总量。
         println!(
-            "  已填缓冲 {fills} 次（{} 帧一次，约 {:.2} ms 音频）",
-            render.format.buffer_frames,
-            (fills * u64::from(render.format.buffer_frames)) as f64 * 1000.0
-                / f64::from(render.format.sample_rate)
+            "  已填缓冲 {fills} 次（每次最多 {} 帧）",
+            render.format.buffer_frames
         );
         // 一次都没填 = 设备根本没消费。此时再往下算延迟只会得到一个假的「没测到脉冲」，
         // 必须把真正的原因喊出来，否则下一次还会有人以为是自己麦克风没开。

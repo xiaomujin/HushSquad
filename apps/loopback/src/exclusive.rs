@@ -40,6 +40,57 @@ pub struct ExclusiveFormat {
     pub negotiation: String,
 }
 
+/// 把系统定时器精度提到 1 ms，drop 时还原。
+///
+/// 为什么需要：Windows 默认定时器精度约 15.6 ms，`sleep(1ms)` 实际会睡 15 ms。
+/// 这对两条路都是灾难——轮询模式按 15 ms 的节奏补数据，喂不动 6–10 ms 的设备缓冲；
+/// `pump_impulse` 同样按 1 ms 的节奏供料，供不上就大面积欠载（实测共享模式 3 s 欠载 1122–1602 样本）。
+pub struct TimerResolution {
+    #[cfg(windows)]
+    active: bool,
+}
+
+impl TimerResolution {
+    /// 申请 1 ms 精度；失败也不致命，只是退回默认精度。
+    #[must_use]
+    pub fn raise() -> Self {
+        #[cfg(windows)]
+        {
+            // SAFETY: 无指针参数，只是向 winmm 请求全局定时器精度。
+            let active = unsafe { windows::Win32::Media::timeBeginPeriod(1) } == 0;
+            Self { active }
+        }
+        #[cfg(not(windows))]
+        {
+            Self {}
+        }
+    }
+}
+
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.active {
+            // SAFETY: 与 raise() 里的 timeBeginPeriod(1) 配对。
+            unsafe { windows::Win32::Media::timeEndPeriod(1) };
+        }
+    }
+}
+
+/// 事件驱动的取用方式。
+///
+/// 实测这台机器的 Realtek 端点只有**轮询**能真正跑起来：事件驱动能 Initialize、能 Start，
+/// 但设备时钟恒为 0、`padding` 恒等于缓冲大小，一个样本都不消费。所以不能写死事件驱动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveMode {
+    /// 先试事件驱动，失败再试轮询（默认）。
+    Auto,
+    /// 只用事件驱动。
+    Event,
+    /// 只用轮询：靠 1 ms 定时器精度盯着 `padding` 补数据。
+    Poll,
+}
+
 /// 独占模式的渲染句柄。**必须持有**：drop 即停流并回收线程。
 pub struct ExclusiveRender {
     /// 实际格式。
@@ -74,6 +125,7 @@ pub fn start(
     sample_rate: u32,
     buffer_frames: Option<u32>,
     device_name: Option<String>,
+    mode: ExclusiveMode,
 ) -> Result<ExclusiveRender, String> {
     #[cfg(windows)]
     {
@@ -84,6 +136,7 @@ pub fn start(
             sample_rate,
             buffer_frames,
             device_name,
+            mode,
         )
     }
     #[cfg(not(windows))]
@@ -95,6 +148,7 @@ pub fn start(
             sample_rate,
             buffer_frames,
             device_name,
+            mode,
         );
         Err("独占模式目前只在 Windows(WASAPI) 上实现".to_owned())
     }
@@ -179,7 +233,7 @@ mod platform {
         Some(qpc - wall)
     }
 
-    use super::{ExclusiveFormat, ExclusiveRender};
+    use super::{ExclusiveFormat, ExclusiveMode, ExclusiveRender};
 
     /// `WAVE_FORMAT_IEEE_FLOAT` 的数值：windows crate 里没导出这个常量，自己写死。
     const IEEE_FLOAT_TAG: u16 = 0x0003;
@@ -407,6 +461,7 @@ mod platform {
         sample_rate: u32,
         buffer_frames: Option<u32>,
         device_name: Option<String>,
+        mode: ExclusiveMode,
     ) -> Result<ExclusiveRender, String> {
         let (init_tx, init_rx) = mpsc::channel::<Result<ExclusiveFormat, String>>();
         let stop = Arc::new(AtomicBool::new(false));
@@ -425,6 +480,7 @@ mod platform {
                     sample_rate,
                     buffer_frames,
                     device_name,
+                    mode,
                     &stop_thread,
                     &stats_thread,
                     &fills_thread,
@@ -461,6 +517,7 @@ mod platform {
         sample_rate: u32,
         buffer_frames: Option<u32>,
         device_name: Option<String>,
+        mode: ExclusiveMode,
         stop: &AtomicBool,
         stats: &PlayoutStats,
         fills: &std::sync::atomic::AtomicU64,
@@ -556,7 +613,12 @@ mod platform {
             //
             // 顺序很关键：第一次实现把 periodicity 放最内层，结果在「1 个周期 + periodicity=duration」
             // 上就成功了，于是「2 个周期 + periodicity=0」这个标准组合从来没被试到。
-            for flags in [AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0_u32] {
+            let flag_candidates: &[u32] = match mode {
+                ExclusiveMode::Auto => &[AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0],
+                ExclusiveMode::Event => &[AUDCLNT_STREAMFLAGS_EVENTCALLBACK],
+                ExclusiveMode::Poll => &[0],
+            };
+            for &flags in flag_candidates {
                 for periodic_mode in 0..3 {
                     for duration in &durations {
                         // 0 = 非周期；period = 每个设备周期唤醒一次（标准独占事件驱动）；

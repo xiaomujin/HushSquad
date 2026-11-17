@@ -379,9 +379,8 @@ fn format_rank(format: cpal::SampleFormat) -> u8 {
 fn choose_config(
     device: &cpal::Device,
     input: bool,
+    preferred_rate: u32,
 ) -> Result<(cpal::StreamConfig, cpal::SampleFormat), AudioIoError> {
-    // cpal 0.18 把 SampleRate 变成了 u32 的类型别名，不再有 .0 字段。
-    let preferred_rate: u32 = PREFERRED_SAMPLE_RATE;
     let ranges: Vec<cpal::SupportedStreamConfigRange> = if input {
         device
             .supported_input_configs()
@@ -448,9 +447,49 @@ pub fn start_capture(
     buffer_frames: Option<u32>,
     stamps: Option<rtrb::Producer<CallbackStamp>>,
 ) -> Result<CaptureHandle, AudioIoError> {
+    start_capture_impl(device_name, producer, events, buffer_frames, stamps, false)
+}
+
+/// 在**播放设备**上开一条采集流（WASAPI 回环）。
+///
+/// 为什么需要它：物理环回把「播放缓冲 + DAC + 空气 + ADC + 采集缓冲」揉成一个数，
+/// 分不清哪一段该优化。回环采集拿到的是设备**真正要播的那份数据**，于是延迟可以拆成
+/// 「播放侧 + 数字回环」与「声学 + 采集侧」两段，分别量。
+///
+/// 只有 WASAPI 有这个能力（cpal 在渲染设备上建采集流时会自动开 loopback 模式），
+/// 其它后端会返回设备找不到。
+pub fn start_loopback_capture(
+    device_name: Option<&str>,
+    producer: rtrb::Producer<f32>,
+    events: Sender<StreamEvent>,
+    buffer_frames: Option<u32>,
+    stamps: Option<rtrb::Producer<CallbackStamp>>,
+) -> Result<CaptureHandle, AudioIoError> {
+    start_capture_impl(device_name, producer, events, buffer_frames, stamps, true)
+}
+
+fn start_capture_impl(
+    device_name: Option<&str>,
+    producer: rtrb::Producer<f32>,
+    events: Sender<StreamEvent>,
+    buffer_frames: Option<u32>,
+    stamps: Option<rtrb::Producer<CallbackStamp>>,
+    loopback: bool,
+) -> Result<CaptureHandle, AudioIoError> {
     let host = cpal::default_host();
-    let device = find_device(&host, device_name, true)?;
-    let (mut config, sample_format) = choose_config(&device, true)?;
+    // 回环时设备要在**输出**列表里找，但流是按输入建的（cpal 借此开 loopback 模式）。
+    let device = find_device(&host, device_name, !loopback)?;
+    // 回环必须用端点的**混音格式**：WASAPI 的 loopback 采集不接受别的采样率
+    // （实测传 48 kHz 直接 AUDCLNT_E_UNSUPPORTED_FORMAT），而混音格式就是设备的默认输出配置。
+    // 正常采集则从输入侧挑配置。
+    let (mut config, sample_format) = if loopback {
+        let default = device
+            .default_output_config()
+            .map_err(|e| AudioIoError::Config(e.to_string()))?;
+        (default.config(), default.sample_format())
+    } else {
+        choose_config(&device, true, PREFERRED_SAMPLE_RATE)?
+    };
     apply_buffer(&mut config, buffer_frames);
     let format = StreamFormat {
         sample_rate: config.sample_rate,
@@ -579,10 +618,11 @@ pub fn start_playout(
     events: Sender<StreamEvent>,
     buffer_frames: Option<u32>,
     stamps: Option<rtrb::Producer<CallbackStamp>>,
+    preferred_rate: u32,
 ) -> Result<PlayoutHandle, AudioIoError> {
     let host = cpal::default_host();
     let device = find_device(&host, device_name, false)?;
-    let (mut config, sample_format) = choose_config(&device, false)?;
+    let (mut config, sample_format) = choose_config(&device, false, preferred_rate)?;
     apply_buffer(&mut config, buffer_frames);
     let format = StreamFormat {
         sample_rate: config.sample_rate,
