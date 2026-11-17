@@ -2,7 +2,8 @@
 
 use std::f32::consts::PI;
 
-use audio_core::{ChainDesc, FRAME_SAMPLES, OpusConfig, SAMPLE_RATE};
+use audio_core::{ChainDesc, FRAME_SAMPLES, Frame, OpusConfig, SAMPLE_RATE, Stage, WorkerStage};
+use testkit::alloc;
 use testkit::run::{CodecSpec, parse_codec, run_samples};
 
 fn material(frames: usize) -> Vec<f32> {
@@ -85,6 +86,57 @@ fn implemented_stages_report_per_stage_cost() {
             cpu[key].p95
         );
     }
+}
+
+/// 故意每帧分配的环节，用来证明 WorkerStage 真的把分配挪走了。
+struct Allocator;
+
+impl Stage for Allocator {
+    fn name(&self) -> &'static str {
+        "allocator"
+    }
+
+    fn latency_samples(&self) -> usize {
+        0
+    }
+
+    fn process(&mut self, _frame: &mut Frame) -> f32 {
+        let scratch = vec![0_u8; 64];
+        std::hint::black_box(&scratch);
+        1.0
+    }
+}
+
+#[test]
+fn worker_stage_keeps_allocations_off_the_audio_thread() {
+    // P3-7 的验收：环节自己每帧分配，但音频侧必须 0 次。
+    let (mut stage, mut worker) = WorkerStage::new(Box::new(Allocator), 2);
+    let mut frame: Frame = [0.1; FRAME_SAMPLES];
+
+    // 音频侧：只做入队/出队，不碰环节。
+    let before = alloc::count();
+    for _ in 0..50 {
+        let mut copy = frame;
+        stage.process(&mut copy);
+    }
+    let audio_side = alloc::count() - before;
+    assert_eq!(
+        audio_side, 0,
+        "音频侧分配了 {audio_side} 次——队列里不该有 Vec/Box/format!"
+    );
+
+    // 反证：同一个环节在工作线程侧确实会分配，说明这个测试不是空转。
+    let before_worker = alloc::count();
+    let processed = worker.run_pending();
+    assert!(processed > 0, "工作线程侧一帧都没处理");
+    assert!(
+        alloc::count() > before_worker,
+        "工作线程侧也没分配，这个测试证明不了任何事"
+    );
+
+    // 环节自己的延迟 0，队列 2 帧 ⇒ 20 ms。
+    assert_eq!(stage.latency_samples(), 2 * FRAME_SAMPLES);
+    frame.fill(0.0);
 }
 
 #[test]

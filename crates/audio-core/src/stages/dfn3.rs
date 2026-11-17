@@ -99,6 +99,7 @@ impl Stage for Dfn3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SAMPLE_RATE;
     use crate::samples_to_ms;
 
     fn run(stage: &mut Dfn3, input: &[f32]) -> Vec<f32> {
@@ -143,5 +144,35 @@ mod tests {
         assert!(out.iter().all(|x| x.is_finite()));
         let peak = out.iter().fold(0.0_f32, |acc, x| acc.max(x.abs()));
         assert!(peak <= 2.0, "输出峰值 {peak}，模型输出没有被约束");
+    }
+
+    #[test]
+    fn worker_wrapper_adds_the_queue_delay_on_top_of_thirty_ms() {
+        // P3-7 的预算口径：DFN3 的 30 ms 是**算法**延迟，队列的 depth 帧是**另算**的。
+        // 两个数都要进附录 A，只记一个就会少记 20 ms。
+        use crate::stages::WorkerStage;
+        let (mut stage, mut worker) = WorkerStage::new(Box::new(Dfn3::new()), 2);
+        assert_eq!(
+            stage.latency_samples(),
+            1_440 + 2 * FRAME_SAMPLES,
+            "30 ms 算法延迟 + 20 ms 队列延迟 = 50 ms"
+        );
+
+        // 跑几帧，确认真的能穿过队列拿到非零输出（也顺带证明 Dfn3 是 Send）。
+        let mut got_output = false;
+        for index in 0..8 {
+            let mut frame: Frame = [0.0; FRAME_SAMPLES];
+            for (n, sample) in frame.iter_mut().enumerate() {
+                let t = (index * FRAME_SAMPLES + n) as f32 / SAMPLE_RATE as f32;
+                *sample = 0.4 * (2.0 * std::f32::consts::PI * 300.0 * t).sin();
+            }
+            stage.process(&mut frame);
+            worker.run_pending();
+            if frame.iter().any(|x| x.abs() > 1e-3) {
+                got_output = true;
+            }
+        }
+        assert!(got_output, "队列里没出来任何有声帧");
+        assert_eq!(stage.stats().underruns, 0, "手工驱动不该有下溢");
     }
 }
