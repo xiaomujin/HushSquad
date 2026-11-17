@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "frames": 300,
+  "cases": [
+    {
+      "material": "clean",
+      "chain": "none",
+      "rms_dbfs": -19.793453427631647,
+      "packet_bytes_mean": 40.43666666666667,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "clean",
+      "chain": "highpass",
+      "rms_dbfs": -19.78434246833021,
+      "packet_bytes_mean": 40.473333333333336,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "clean",
+      "chain": "rnn",
+      "rms_dbfs": -20.397780239055923,
+      "packet_bytes_mean": 40.99666666666667,
+      "vad_mean": 0.564740002155304,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "clean",
+      "chain": "highpass,rnn,agc2",
+      "rms_dbfs": -14.05336891750766,
+      "packet_bytes_mean": 40.98,
+      "vad_mean": 0.5707768797874451,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "babble",
+      "chain": "none",
+      "rms_dbfs": -21.69836690173002,
+      "packet_bytes_mean": 40.41,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "babble",
+      "chain": "highpass",
+      "rms_dbfs": -21.679767126697307,
+      "packet_bytes_mean": 40.373333333333335,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "babble",
+      "chain": "rnn",
+      "rms_dbfs": -22.32577030331557,
+      "packet_bytes_mean": 40.43333333333333,
+      "vad_mean": 0.09819294512271881,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "babble",
+      "chain": "highpass,rnn,agc2",
+      "rms_dbfs": -29.131747790371566,
+      "packet_bytes_mean": 32.72,
+      "vad_mean": 0.06949347257614136,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "fan",
+      "chain": "none",
+      "rms_dbfs": -23.61658207812013,
+      "packet_bytes_mean": 34.45333333333333,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "fan",
+      "chain": "highpass",
+      "rms_dbfs": -24.364819781054972,
+      "packet_bytes_mean": 34.68666666666667,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "fan",
+      "chain": "rnn",
+      "rms_dbfs": -34.443826094264864,
+      "packet_bytes_mean": 35.76,
+      "vad_mean": 0.9655875563621521,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "fan",
+      "chain": "highpass,rnn,agc2",
+      "rms_dbfs": -24.945304815443595,
+      "packet_bytes_mean": 36.27,
+      "vad_mean": 0.9494738578796387,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "keyboard",
+      "chain": "none",
+      "rms_dbfs": -26.253110002525425,
+      "packet_bytes_mean": 30.293333333333333,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "keyboard",
+      "chain": "highpass",
+      "rms_dbfs": -26.232027911905305,
+      "packet_bytes_mean": 30.666666666666668,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "keyboard",
+      "chain": "rnn",
+      "rms_dbfs": -26.808630501320998,
+      "packet_bytes_mean": 30.22,
+      "vad_mean": 0.03445494547486305,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "keyboard",
+      "chain": "highpass,rnn,agc2",
+      "rms_dbfs": -20.81353074847536,
+      "packet_bytes_mean": 31.276666666666667,
+      "vad_mean": 0.02843981608748436,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "chair",
+      "chain": "none",
+      "rms_dbfs": -21.011727713616875,
+      "packet_bytes_mean": 36.33,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "chair",
+      "chain": "highpass",
+      "rms_dbfs": -21.01243293412469,
+      "packet_bytes_mean": 36.29,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "chair",
+      "chain": "rnn",
+      "rms_dbfs": -51.83027569971435,
+      "packet_bytes_mean": 27.08,
+      "vad_mean": 0.054825205355882645,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "chair",
+      "chain": "highpass,rnn,agc2",
+      "rms_dbfs": -38.079614086090075,
+      "packet_bytes_mean": 29.73,
+      "vad_mean": 0.052861928939819336,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "noise_only",
+      "chain": "none",
+      "rms_dbfs": -13.316586137337108,
+      "packet_bytes_mean": 35.01,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "noise_only",
+      "chain": "highpass",
+      "rms_dbfs": -13.321634809187175,
+      "packet_bytes_mean": 35.00666666666667,
+      "vad_mean": 1.0,
+      "algorithm_ms": 6.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "noise_only",
+      "chain": "rnn",
+      "rms_dbfs": -13.62440987637639,
+      "packet_bytes_mean": 36.916666666666664,
+      "vad_mean": 0.6911667585372925,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    },
+    {
+      "material": "noise_only",
+      "chain": "highpass,rnn,agc2",
+      "rms_dbfs": -10.367523753641121,
+      "packet_bytes_mean": 37.85,
+      "vad_mean": 0.5796311497688293,
+      "algorithm_ms": 16.5,
+      "allocations_in_hot_path": 0
+    }
+  ]
+}

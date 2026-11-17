@@ -15,7 +15,8 @@ HushSquad 离线测量工具\n\
 用法：\n\
   testkit gen           --out <dir> [--seed 42] [--seconds 20]\n\
   testkit run           --in <wav> [--out <wav>] [--chain <desc>] [--codec <spec>] [--report <json>] [--warmup 50] [--allow-allocations]\n\
-  testkit latency-model [--chain <desc>] [--codec <spec>]\n\
+  testkit latency-model [--chain <desc>] [--codec <spec>]
+  testkit baseline      --out <json> | --check <json>   （离线回归基线：只存指标，不存 wav）\n\
 \n\
 链路描述 --chain：none | 逗号分隔的 highpass,rnn,agc2,dfn3,opus（dfn3 需要 --features denoise-dfn3 才编进二进制）\n\
 编解码   --codec：none | opus[:10ms][:32k]\n\
@@ -44,6 +45,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         Some("gen") => testkit::synth::main(&args[1..]),
         Some("run") => testkit::run::main(&args[1..]),
         Some("latency-model") => testkit::model::main(&args[1..]),
+        Some("baseline") => testkit::baseline::main(&args[1..]),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             Ok(())

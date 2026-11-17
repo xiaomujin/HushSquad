@@ -7,11 +7,15 @@
 //! 这些模块只在测量工具里用，**不**进实时链路：实时线程不允许碰文件、不允许分配。
 
 pub mod alloc;
+pub mod baseline;
 pub mod model;
 pub mod report;
 pub mod run;
 pub mod synth;
 pub mod wav;
+
+/// 合成素材目录（`testkit gen` 的输出位置）。基线从这里读，路径只在这里定义一次。
+pub const SYNTHETIC_DIR: &str = "testdata/synthetic";
 
 /// 读 `--flag value` 的取值，并把游标推进一格。
 pub fn next_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
