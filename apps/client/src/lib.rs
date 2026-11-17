@@ -28,6 +28,7 @@ pub mod app;
 pub mod audio;
 pub mod config;
 pub mod control;
+pub mod local;
 pub mod timer;
 pub mod voice;
 

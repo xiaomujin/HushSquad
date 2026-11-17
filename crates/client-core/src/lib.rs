@@ -139,6 +139,10 @@ pub struct Client {
     session_id: u64,
     sender_id: u32,
     voice_token: [u8; 16],
+    /// 服务器下发的设备 token（`AuthResult.device_token`），空表示没有。
+    ///
+    /// 客户端存下来，下次就能凭它免密登录 —— 这正是「不用每次都输密码」的实现。
+    device_token: Vec<u8>,
     /// 服务器给的密钥世代（来自 ServerHello）。派生语音密钥要用它。
     key_epoch: u16,
     voice_host: String,
@@ -170,6 +174,7 @@ impl Client {
             session_id: 0,
             sender_id: 0,
             voice_token: [0u8; 16],
+            device_token: Vec::new(),
             key_epoch: 0,
             voice_host: String::new(),
             voice_port: 0,
@@ -210,6 +215,11 @@ impl Client {
     #[must_use]
     pub const fn voice_token(&self) -> &[u8; 16] {
         &self.voice_token
+    }
+
+    /// 取走服务器下发的设备 token（取走就清空，所以只会拿到一次）。
+    pub fn take_device_token(&mut self) -> Option<Vec<u8>> {
+        (!self.device_token.is_empty()).then(|| std::mem::take(&mut self.device_token))
     }
 
     /// 服务器给的密钥世代（ServerHello 里那个）。派生语音密钥时原样传给
@@ -371,6 +381,7 @@ impl Client {
             }
             Some(Kind::AuthResult(result)) => {
                 if result.ok {
+                    self.device_token = result.device_token.clone();
                     self.state = ClientState::Ready;
                     actions.push(ClientAction::BindVoice {
                         host: self.voice_host.clone(),

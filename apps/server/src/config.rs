@@ -1,42 +1,79 @@
-//! 命令行参数。
+//! 命令行：一条命令就能跑，其余都是可选项。
+//!
+//! ```text
+//! hushsquad-server                       # 全部用默认值，第一次跑会自动建库、建证书
+//! hushsquad-server adduser alice         # 加账号（密码不回显，问两遍）
+//! hushsquad-server ls                    # 看有哪些账号
+//! hushsquad-server passwd alice          # 改密码
+//! hushsquad-server del alice             # 删账号
+//! hushsquad-server cert                  # 重新生成证书
+//! ```
+//!
+//! 设计取向：**默认值必须是对的**。第一次跑不要求任何一个参数，
+//! 不该让用户先去学 openssl 和 argon2 的 PHC 格式。
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// 一个子命令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// 跑服务器（默认）。
+    Serve,
+    /// 加账号。
+    AddUser(String),
+    /// 改密码。
+    Passwd(String),
+    /// 删账号。
+    DelUser(String),
+    /// 列账号。
+    List,
+    /// 重新生成证书。
+    Cert,
+    /// 打印用法。
+    Help,
+}
+
 /// 用法说明。
-pub const USAGE: &str = "\
-HushSquad 服务器\n\
-\n\
-用法：\n\
-  hushsquad-server --users <文件> --cert <pem> --key <pem> [选项]\n\
-\n\
-必填：\n\
-  --users <文件>        用户表，每行 `用户名:argon2id PHC 串:权限位`（# 开头为注释）\n\
-  --cert <pem>          TLS 证书链\n\
-  --key <pem>           TLS 私钥\n\
-\n\
-选项：\n\
-  --control-bind <地址>  控制面 TCP 监听地址（默认 0.0.0.0:64738）\n\
-  --voice-bind <地址>    语音面 UDP 监听地址（默认 0.0.0.0:64739）\n\
-  --voice-host <主机>    写进 ServerHello 的对外地址（默认 127.0.0.1）\n\
-  --voice-port <端口>    写进 ServerHello 的对外端口（默认取 --voice-bind 的端口）\n\
-  --channel <名字>       预建频道，可重复\n\
-  --metrics-interval <秒> 指标打印间隔（默认 60）\n\
-\n\
-辅助：\n\
-  --hash-password <密码> 打印一条用户记录里要填的 argon2id PHC 串\n\
-\n\
-生成一个自签证书（一行）：\n\
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \\\n    -keyout key.pem -out cert.pem -days 365 -subj /CN=localhost \\\n    -addext \"subjectAltName=DNS:localhost,IP:127.0.0.1\"\n\
-\n\
-必须带 -addext（SAN）：客户端用 rustls 校验证书，它**只认 SAN、不认 CN**，\n\
-没有 SAN 的证书即使 --ca 给了也会被拒。要连别的地址就把那个 IP 也写进 SAN。\n";
+pub const USAGE: &str = r"HushSquad 服务器
+
+用法：
+  hushsquad-server [选项]                 跑服务器（全部有默认值）
+  hushsquad-server adduser <用户名>       加账号（会问两遍密码）
+  hushsquad-server passwd <用户名>        改密码
+  hushsquad-server del <用户名>           删账号
+  hushsquad-server ls                     列出账号
+  hushsquad-server cert                   重新生成自签证书
+
+选项（都有默认值，一般一个都不用给）：
+  --db <文件>            账号库（默认 hushsquad.db，第一次跑自动建）
+  --cert <pem>           证书（默认 hushsquad-cert.pem，不存在就自动生成）
+  --key <pem>            私钥（默认 hushsquad-key.pem）
+  --bind <地址>          控制面监听（默认 0.0.0.0:64738）
+  --voice-bind <地址>    语音面监听（默认 0.0.0.0:64739）
+  --voice-host <主机>    对外宣告的语音地址（默认自动取本机局域网 IP）
+  --voice-port <端口>    对外宣告的语音端口（默认同 --voice-bind）
+  --channel <名字>       预建频道（可重复；默认建一个「大厅」）
+  --no-anonymous         不允许「只用设备号」的匿名登录
+  --max-anonymous <数量> 匿名账号上限（默认 200）
+  --metrics-interval <秒> 指标打印间隔（默认 60，0 表示不打印）
+  --help                 打印这段说明
+
+典型用法：
+  1. 服务器上直接跑 `hushsquad-server`（会自动建库与证书，打印出证书指纹）
+  2. `hushsquad-server adduser 你的名字` 建一个账号
+  3. 客户端 `hushsquad-client --server <服务器IP> --user 你的名字`，按提示输密码
+
+客户端第一次连会记住证书指纹（TOFU），所以不用把证书拷过去。
+";
 
 /// 配置。
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// 用户表路径。
-    pub users: PathBuf,
+    /// 子命令。
+    pub command: Command,
+    /// 账号库路径。
+    pub db: PathBuf,
     /// 证书路径。
     pub cert: PathBuf,
     /// 私钥路径。
@@ -45,28 +82,45 @@ pub struct Config {
     pub control_bind: String,
     /// 语音面监听地址。
     pub voice_bind: String,
-    /// 对外宣告的语音主机。
-    pub voice_host: String,
-    /// 对外宣告的语音端口。
-    pub voice_port: u16,
+    /// 对外宣告的语音主机；`None` = 自动探测本机局域网地址。
+    pub voice_host: Option<String>,
+    /// 对外宣告的语音端口；`None` = 取 `voice_bind` 的端口。
+    pub voice_port: Option<u16>,
     /// 预建频道。
     pub channels: Vec<String>,
-    /// 指标间隔。
-    pub metrics_interval: Duration,
+    /// 是否允许设备号匿名登录。
+    pub allow_anonymous: bool,
+    /// 匿名账号上限。
+    pub max_anonymous: u32,
+    /// 指标间隔；`None` 表示不打印。
+    pub metrics_interval: Option<Duration>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            command: Command::Serve,
+            db: PathBuf::from("hushsquad.db"),
+            cert: PathBuf::from("hushsquad-cert.pem"),
+            key: PathBuf::from("hushsquad-key.pem"),
+            control_bind: "0.0.0.0:64738".to_owned(),
+            voice_bind: "0.0.0.0:64739".to_owned(),
+            voice_host: None,
+            voice_port: None,
+            channels: vec!["大厅".to_owned()],
+            allow_anonymous: true,
+            max_anonymous: 200,
+            metrics_interval: Some(Duration::from_secs(60)),
+        }
+    }
 }
 
 impl Config {
     /// 解析参数。
     pub fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let mut users = None;
-        let mut cert = None;
-        let mut key = None;
-        let mut control_bind = "0.0.0.0:64738".to_owned();
-        let mut voice_bind = "0.0.0.0:64739".to_owned();
-        let mut voice_host = "127.0.0.1".to_owned();
-        let mut voice_port: Option<u16> = None;
-        let mut channels = Vec::new();
-        let mut metrics_interval = 60u64;
+        let mut config = Self::default();
+        // 用户显式给了 --channel 就不再塞默认的「大厅」。
+        let mut channels_given = false;
 
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
@@ -74,61 +128,59 @@ impl Config {
                 args.next().ok_or_else(|| format!("{arg} 缺少取值"))
             };
             match arg.as_str() {
-                "--hash-password" => {
-                    let password = value()?;
-                    let hash = server_core::UserDb::hash_password(&password)
-                        .map_err(|e| format!("算哈希失败：{e}"))?;
-                    println!("{hash}");
-                    std::process::exit(0);
-                }
-                "--users" => users = Some(PathBuf::from(value()?)),
-                "--cert" => cert = Some(PathBuf::from(value()?)),
-                "--key" => key = Some(PathBuf::from(value()?)),
-                "--control-bind" => control_bind = value()?,
-                "--voice-bind" => voice_bind = value()?,
-                "--voice-host" => voice_host = value()?,
+                "--db" => config.db = PathBuf::from(value()?),
+                "--cert" => config.cert = PathBuf::from(value()?),
+                "--key" => config.key = PathBuf::from(value()?),
+                "--bind" => config.control_bind = value()?,
+                "--voice-bind" => config.voice_bind = value()?,
+                "--voice-host" => config.voice_host = Some(value()?),
                 "--voice-port" => {
-                    voice_port = Some(
+                    config.voice_port = Some(
                         value()?
                             .parse()
                             .map_err(|_| "--voice-port 需要端口号".to_owned())?,
                     );
                 }
-                "--channel" => channels.push(value()?),
+                "--channel" => {
+                    if !channels_given {
+                        config.channels.clear();
+                        channels_given = true;
+                    }
+                    config.channels.push(value()?);
+                }
+                "--no-anonymous" => config.allow_anonymous = false,
+                "--max-anonymous" => {
+                    config.max_anonymous = value()?
+                        .parse()
+                        .map_err(|_| "--max-anonymous 需要数量".to_owned())?;
+                }
                 "--metrics-interval" => {
-                    metrics_interval = value()?
+                    let seconds: u64 = value()?
                         .parse()
                         .map_err(|_| "--metrics-interval 需要秒数".to_owned())?;
+                    config.metrics_interval = (seconds > 0).then(|| Duration::from_secs(seconds));
                 }
-                "--help" | "-h" => {
-                    println!("{USAGE}");
-                    std::process::exit(0);
-                }
+                "--help" | "-h" => config.command = Command::Help,
+                "adduser" => config.command = Command::AddUser(value()?),
+                "passwd" => config.command = Command::Passwd(value()?),
+                "del" => config.command = Command::DelUser(value()?),
+                "ls" => config.command = Command::List,
+                "cert" => config.command = Command::Cert,
                 other => return Err(format!("未知参数 {other:?}")),
             }
         }
+        Ok(config)
+    }
 
-        let voice_port = match voice_port {
-            Some(port) => port,
-            None => voice_bind
+    /// 对外宣告的语音端口。
+    #[must_use]
+    pub fn voice_port(&self) -> u16 {
+        self.voice_port.unwrap_or_else(|| {
+            self.voice_bind
                 .rsplit(':')
                 .next()
                 .and_then(|port| port.parse().ok())
-                .ok_or_else(|| {
-                    "--voice-bind 里的端口解析不出来，请显式给 --voice-port".to_owned()
-                })?,
-        };
-
-        Ok(Self {
-            users: users.ok_or("缺少 --users")?,
-            cert: cert.ok_or("缺少 --cert")?,
-            key: key.ok_or("缺少 --key")?,
-            control_bind,
-            voice_bind,
-            voice_host,
-            voice_port,
-            channels,
-            metrics_interval: Duration::from_secs(metrics_interval.max(1)),
+                .unwrap_or(64_739)
         })
     }
 }
@@ -142,48 +194,60 @@ mod tests {
     }
 
     #[test]
-    fn required_flags_are_required() {
-        assert!(parse(&[]).is_err());
-        assert!(parse(&["--users", "u"]).is_err());
+    fn no_arguments_at_all_is_a_valid_server_config() {
+        // 这是这次改动的核心：第一次跑不该要求任何参数。
+        let config = parse(&[]).expect("裸跑必须可用");
+        assert_eq!(config.command, Command::Serve);
+        assert_eq!(config.db, PathBuf::from("hushsquad.db"));
+        assert_eq!(config.control_bind, "0.0.0.0:64738");
+        assert_eq!(config.voice_port(), 64_739);
+        assert!(config.allow_anonymous);
+        assert_eq!(config.channels, vec!["大厅".to_owned()]);
     }
 
     #[test]
-    fn voice_port_defaults_to_the_bind_port() {
-        let config = parse(&[
-            "--users",
-            "u",
-            "--cert",
-            "c",
-            "--key",
-            "k",
-            "--voice-bind",
-            "0.0.0.0:50000",
-        ])
-        .unwrap();
-        assert_eq!(config.voice_port, 50_000);
-        assert_eq!(config.metrics_interval, Duration::from_secs(60));
+    fn subcommands_are_recognised() {
+        assert_eq!(
+            parse(&["adduser", "alice"]).unwrap().command,
+            Command::AddUser("alice".to_owned())
+        );
+        assert_eq!(
+            parse(&["passwd", "alice"]).unwrap().command,
+            Command::Passwd("alice".to_owned())
+        );
+        assert_eq!(
+            parse(&["del", "alice"]).unwrap().command,
+            Command::DelUser("alice".to_owned())
+        );
+        assert_eq!(parse(&["ls"]).unwrap().command, Command::List);
+        assert_eq!(parse(&["cert"]).unwrap().command, Command::Cert);
+        assert_eq!(parse(&["--help"]).unwrap().command, Command::Help);
+        assert!(parse(&["adduser"]).is_err(), "缺用户名要报错");
     }
 
     #[test]
-    fn channels_accumulate() {
-        let config = parse(&[
-            "--users",
-            "u",
-            "--cert",
-            "c",
-            "--key",
-            "k",
-            "--channel",
-            "大厅",
-            "--channel",
-            "游戏",
-        ])
-        .unwrap();
-        assert_eq!(config.channels, vec!["大厅".to_owned(), "游戏".to_owned()]);
+    fn giving_any_channel_drops_the_default_one() {
+        let config = parse(&["--channel", "游戏", "--channel", "开会"]).unwrap();
+        assert_eq!(config.channels, vec!["游戏".to_owned(), "开会".to_owned()]);
+    }
+
+    #[test]
+    fn voice_port_falls_back_to_the_bind_port() {
+        let config = parse(&["--voice-bind", "0.0.0.0:50000"]).unwrap();
+        assert_eq!(config.voice_port(), 50_000);
+        let config = parse(&["--voice-bind", "0.0.0.0:50000", "--voice-port", "6000"]).unwrap();
+        assert_eq!(config.voice_port(), 6_000);
+    }
+
+    #[test]
+    fn zero_turns_metrics_off_and_anonymous_can_be_disabled() {
+        let config = parse(&["--metrics-interval", "0", "--no-anonymous"]).unwrap();
+        assert!(config.metrics_interval.is_none());
+        assert!(!config.allow_anonymous);
     }
 
     #[test]
     fn unknown_flags_are_refused() {
-        assert!(parse(&["--users", "u", "--cert", "c", "--key", "k", "--nope"]).is_err());
+        assert!(parse(&["--nope"]).is_err());
     }
 }

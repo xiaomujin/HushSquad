@@ -1,4 +1,12 @@
-//! 命令行参数。
+//! 命令行参数：默认值必须是对的，常见的两种用法各自只要一个参数。
+//!
+//! ```text
+//! hushsquad-client --server 192.168.1.10              # 匿名进（设备号登录）
+//! hushsquad-client --server 192.168.1.10 --user 张三   # 账号登录，会问密码
+//! ```
+//!
+//! 证书不用拷：第一次连会记住指纹（TOFU），之后指纹变了就拒绝。
+//! 本地状态（设备号、记住的指纹）存在一个小 SQLite 库里，默认在用户数据目录。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -7,21 +15,29 @@ use std::time::Duration;
 pub const USAGE: &str = r"HushSquad 客户端
 
 用法：
-  hushsquad-client --server <主机:端口> --user <用户名> [选项]
+  hushsquad-client --server <主机[:端口]>                 匿名进入（按设备号）
+  hushsquad-client --server <主机[:端口]> --user <用户名>  账号登录（会问密码）
 
 必填：
-  --server <主机:端口>    服务器控制面地址（默认 127.0.0.1:64738）
-  --user <用户名>         登录用户名
+  --server <主机[:端口]>  服务器地址（端口默认 64738）
 
-身份：
-  --password <密码>       密码。也可以放在环境变量 HUSHSQUAD_PASSWORD 里，
-                          避免出现在进程列表与 shell 历史中（推荐）
+身份（二选一，都不给就是匿名）：
+  --user <用户名>         账号；密码会提示输入，也可放环境变量 HUSHSQUAD_PASSWORD
+  --anonymous             显式要求匿名（按设备号建号，不需要密码）
 
 证书：
-  --ca <pem>              信任这张证书（自签证书就用它）
-  --insecure              不校验服务器证书。只用于本机/内网联调，
-                          它让中间人可以冒充服务器
+  （默认）                第一次连记住服务器证书指纹，之后指纹变了就拒绝
+  --ca <pem>              只信这一张证书
+  --insecure              完全不校验（只用于本机调试，中间人可冒充服务器）
   --server-name <名字>    证书里该匹配的名字（默认取 --server 的主机部分）
+  --reset-trust           忘掉这台服务器记住的指纹（服务器换了证书时用）
+
+设备号：
+  --device-id <十六进制>  指定设备号（32 个十六进制字符，可带 - 分隔）
+  --show-device-id        打印本机设备号后退出（匿名身份就是它）
+
+本地状态：
+  --db <文件>             设备号与信任记录的库（默认在用户数据目录）
 
 频道与音频：
   --channel <名字或 id>   进哪个频道（默认第一个频道）
@@ -45,9 +61,7 @@ pub const USAGE: &str = r"HushSquad 客户端
   --help                  打印这段说明
 
 退出时总会打印一份汇总（含语音面 RTT 的 p50/p95/p99），可直接贴进报告。
-
-提示：设备必须是 48 kHz。不是的话用 --mic / --speaker 换一个
-（--list-devices 会列出每个设备支持的采样率）。";
+";
 
 /// 一帧的时长（毫秒）。语音面按这个节奏收发，与 `audio-core::FRAME_MS` 一致。
 pub const FRAME_MS: u64 = 10;
@@ -55,23 +69,33 @@ pub const FRAME_MS: u64 = 10;
 /// 配置。
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// 控制面地址（主机:端口）。
+    /// 服务器地址（主机[:端口]）。
     pub server: String,
-    /// 用户名。
+    /// 用户名；空 = 匿名。
     pub user: String,
-    /// 密码。
+    /// 密码（只在账号登录时用）。
     pub password: String,
+    /// 显式要求匿名登录。
+    pub anonymous: bool,
     /// 要进的频道：名字或 id。
     pub channel: String,
-    /// 信任的证书（PEM）。
+    /// 只信这张证书。
     pub ca: Option<PathBuf>,
-    /// 跳过证书校验。
+    /// 完全不校验证书。
     pub insecure: bool,
     /// 证书里该匹配的名字。
     pub server_name: Option<String>,
-    /// 麦克风设备名（子串匹配）。
+    /// 忘掉这台服务器记住的指纹。
+    pub reset_trust: bool,
+    /// 指定设备号。
+    pub device_id: Option<[u8; 16]>,
+    /// 只打印设备号。
+    pub show_device_id: bool,
+    /// 本地状态库。
+    pub db: Option<PathBuf>,
+    /// 麦克风设备名。
     pub mic: Option<String>,
-    /// 扬声器设备名（子串匹配）。
+    /// 扬声器设备名。
     pub speaker: Option<String>,
     /// 不开麦克风。
     pub no_mic: bool,
@@ -83,17 +107,17 @@ pub struct Config {
     pub dtx: bool,
     /// 用合成正弦音代替麦克风（Hz）。
     pub tone: Option<f32>,
-    /// 抖动缓冲的目标延迟下限（毫秒）。
+    /// 抖动缓冲下限（毫秒）。
     pub jitter_min_ms: u32,
-    /// 抖动缓冲的目标延迟上限（毫秒）。上限就是延迟与抗抖动的旋钮。
+    /// 抖动缓冲上限（毫秒）。
     pub jitter_max_ms: u32,
     /// 本地 UDP 绑定地址。
     pub bind: String,
-    /// 指标打印间隔；`None` 表示不打印。
+    /// 指标打印间隔。
     pub stats_interval: Option<Duration>,
-    /// 打点间隔；`None` 表示不打点。
+    /// 打点间隔。
     pub probe_interval: Option<Duration>,
-    /// 跑多久就退出；`None` 表示跑到 Ctrl-C。
+    /// 跑多久退出。
     pub run_for: Option<Duration>,
     /// 只列设备。
     pub list_devices: bool,
@@ -101,77 +125,98 @@ pub struct Config {
     pub quiet: bool,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server: "127.0.0.1:64738".to_owned(),
+            user: String::new(),
+            password: String::new(),
+            anonymous: false,
+            channel: String::new(),
+            ca: None,
+            insecure: false,
+            server_name: None,
+            reset_trust: false,
+            device_id: None,
+            show_device_id: false,
+            db: None,
+            mic: None,
+            speaker: None,
+            no_mic: false,
+            no_speaker: false,
+            chain: "highpass,agc2".to_owned(),
+            dtx: false,
+            tone: None,
+            jitter_min_ms: 20,
+            jitter_max_ms: 60,
+            bind: "0.0.0.0:0".to_owned(),
+            stats_interval: Some(Duration::from_secs(5)),
+            // 5 秒一次：打点包会占用一个语音序号，接收端会把它算成 1 个空洞丢包。
+            probe_interval: Some(Duration::from_secs(5)),
+            run_for: None,
+            list_devices: false,
+            quiet: false,
+        }
+    }
+}
+
 impl Config {
     /// 解析参数。
     pub fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let mut server = "127.0.0.1:64738".to_owned();
-        let mut user: Option<String> = None;
-        let mut password = String::new();
-        let mut channel = String::new();
-        let mut ca: Option<PathBuf> = None;
-        let mut insecure = false;
-        let mut server_name: Option<String> = None;
-        let mut mic: Option<String> = None;
-        let mut speaker: Option<String> = None;
-        let mut no_mic = false;
-        let mut no_speaker = false;
-        let mut chain = "highpass,agc2".to_owned();
-        let mut dtx = false;
-        let mut tone: Option<f32> = None;
-        let mut jitter_min_ms = 20_u32;
-        let mut jitter_max_ms = 60_u32;
-        let mut bind = "0.0.0.0:0".to_owned();
-        let mut stats_interval = Some(Duration::from_secs(5));
-        // 5 秒一次：打点包**会占用一个语音序号**，接收端会把它算成 1 个丢包（见 app.rs 的报告）。
-        // 1 秒一次会让 30 分钟的通话凭空多出 1% 的「丢包」。
-        let mut probe_interval = Some(Duration::from_secs(5));
-        let mut run_for: Option<Duration> = None;
-        let mut list_devices = false;
-        let mut quiet = false;
-
+        let mut config = Self::default();
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             let mut value = || -> Result<String, String> {
                 args.next().ok_or_else(|| format!("{arg} 缺少取值"))
             };
             match arg.as_str() {
-                "--server" => server = value()?,
-                "--user" => user = Some(value()?),
-                "--password" => password = value()?,
-                "--channel" => channel = value()?,
-                "--ca" => ca = Some(PathBuf::from(value()?)),
-                "--insecure" => insecure = true,
-                "--server-name" => server_name = Some(value()?),
-                "--mic" => mic = Some(value()?),
-                "--speaker" => speaker = Some(value()?),
-                "--no-mic" => no_mic = true,
-                "--no-speaker" => no_speaker = true,
-                "--chain" => chain = value()?,
-                "--dtx" => dtx = true,
-                "--jitter-min" => {
-                    jitter_min_ms = value()?
-                        .parse()
-                        .map_err(|_| "--jitter-min 需要毫秒数".to_owned())?;
+                "--server" => config.server = server_with_default_port(&value()?),
+                "--user" => config.user = value()?,
+                "--password" => config.password = value()?,
+                "--anonymous" => config.anonymous = true,
+                "--channel" => config.channel = value()?,
+                "--ca" => config.ca = Some(PathBuf::from(value()?)),
+                "--insecure" => config.insecure = true,
+                "--server-name" => config.server_name = Some(value()?),
+                "--reset-trust" => config.reset_trust = true,
+                "--device-id" => {
+                    config.device_id = Some(store::client::parse_device_id(&value()?)?)
                 }
-                "--jitter-max" => {
-                    jitter_max_ms = value()?
-                        .parse()
-                        .map_err(|_| "--jitter-max 需要毫秒数".to_owned())?;
-                }
+                "--show-device-id" => config.show_device_id = true,
+                "--db" => config.db = Some(PathBuf::from(value()?)),
+                "--mic" => config.mic = Some(value()?),
+                "--speaker" => config.speaker = Some(value()?),
+                "--no-mic" => config.no_mic = true,
+                "--no-speaker" => config.no_speaker = true,
+                "--chain" => config.chain = value()?,
+                "--dtx" => config.dtx = true,
                 "--tone" => {
-                    let value = value()?;
-                    tone = Some(
-                        value
+                    config.tone = Some(
+                        value()?
                             .parse()
                             .map_err(|_| "--tone 需要频率（Hz）".to_owned())?,
                     );
                 }
-                "--bind" => bind = value()?,
-                "--stats-interval" => stats_interval = seconds(&value()?, "--stats-interval")?,
-                "--probe-interval" => probe_interval = seconds(&value()?, "--probe-interval")?,
-                "--run-for" => run_for = seconds(&value()?, "--run-for")?,
-                "--list-devices" => list_devices = true,
-                "--quiet" => quiet = true,
+                "--jitter-min" => {
+                    config.jitter_min_ms = value()?
+                        .parse()
+                        .map_err(|_| "--jitter-min 需要毫秒数".to_owned())?;
+                }
+                "--jitter-max" => {
+                    config.jitter_max_ms = value()?
+                        .parse()
+                        .map_err(|_| "--jitter-max 需要毫秒数".to_owned())?;
+                }
+                "--bind" => config.bind = value()?,
+                "--stats-interval" => {
+                    config.stats_interval = seconds(&value()?, "--stats-interval")?
+                }
+                "--probe-interval" => {
+                    config.probe_interval = seconds(&value()?, "--probe-interval")?
+                }
+                "--run-for" => config.run_for = seconds(&value()?, "--run-for")?,
+                "--list-devices" => config.list_devices = true,
+                "--quiet" => config.quiet = true,
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -179,50 +224,10 @@ impl Config {
                 other => return Err(format!("未知参数 {other:?}")),
             }
         }
-
-        Ok(Self {
-            server,
-            user: user.unwrap_or_default(),
-            password,
-            channel,
-            ca,
-            insecure,
-            server_name,
-            mic,
-            speaker,
-            no_mic,
-            no_speaker,
-            chain,
-            dtx,
-            tone,
-            jitter_min_ms,
-            jitter_max_ms,
-            bind,
-            stats_interval,
-            probe_interval,
-            run_for,
-            list_devices,
-            quiet,
-        })
+        Ok(config)
     }
 
-    /// 校验真正连服务器才需要的必填项。
-    ///
-    /// `parse` 刻意宽松（`--list-devices` 不该要求登录信息），必填项集中在这里，
-    /// 由 `main` 在确定要连服务器之后调一次。
-    pub fn validate(&self) -> Result<(), String> {
-        if self.user.is_empty() {
-            return Err("缺少 --user".to_owned());
-        }
-        if self.password.is_empty() {
-            return Err(
-                "缺少密码：用 --password，或把密码放进环境变量 HUSHSQUAD_PASSWORD".to_owned(),
-            );
-        }
-        Ok(())
-    }
-
-    /// 密码允许只放在环境变量里。
+    /// 密码允许只放在环境变量里；账号模式下调一次。`parse` 保持纯函数，测试才封闭。
     pub fn with_env_password(mut self) -> Self {
         if self.password.is_empty()
             && let Ok(password) = std::env::var("HUSHSQUAD_PASSWORD")
@@ -230,6 +235,12 @@ impl Config {
             self.password = password;
         }
         self
+    }
+
+    /// 是否匿名登录：没给用户名就算匿名。
+    #[must_use]
+    pub fn is_anonymous(&self) -> bool {
+        self.anonymous || self.user.is_empty()
     }
 
     /// 证书里该匹配的名字：显式给的优先，否则取 `--server` 的主机部分。
@@ -241,13 +252,28 @@ impl Config {
     }
 }
 
-/// 把 `主机:端口` 里的主机切出来（IPv6 也按最后一个冒号切）。
+/// `主机` 后面没写端口就补 64738，省得每次都要打。
+#[must_use]
+pub fn server_with_default_port(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "127.0.0.1:64738".to_owned();
+    }
+    // 已经有端口（最后一个冒号后面是数字）就原样用。
+    if let Some((_, port)) = trimmed.rsplit_once(':')
+        && port.parse::<u16>().is_ok()
+    {
+        return trimmed.to_owned();
+    }
+    format!("{trimmed}:64738")
+}
+
+/// 把 `主机:端口` 里的主机切出来。
 #[must_use]
 pub fn host_of(addr: &str) -> &str {
     addr.rsplit_once(':').map_or(addr, |(host, _)| host)
 }
 
-/// 把秒数解析成 `Duration`；`0` 表示关闭。
 fn seconds(text: &str, flag: &str) -> Result<Option<Duration>, String> {
     let value: u64 = text.parse().map_err(|_| format!("{flag} 需要秒数"))?;
     Ok((value > 0).then(|| Duration::from_secs(value)))
@@ -262,68 +288,55 @@ mod tests {
     }
 
     #[test]
-    fn required_fields_are_checked_by_validate_not_parse() {
-        // parse 宽松：`--list-devices` 不该要求登录信息。
-        let bare = parse(&[]).unwrap();
-        assert!(bare.validate().is_err(), "没有 --user 必须报错");
-        assert!(
-            parse(&["--user", "alice"]).unwrap().validate().is_err(),
-            "没有密码必须报错"
-        );
-        assert!(parse(&["--password", "pw"]).unwrap().validate().is_err());
-        // 密码可以留空等环境变量补，所以 validate 只看最终值。
-        let ok = parse(&["--user", "alice", "--password", "pw"]).unwrap();
-        assert!(ok.validate().is_ok());
-        assert_eq!(ok.password, "pw");
+    fn only_a_server_is_needed_and_it_means_anonymous() {
+        let config = parse(&["--server", "192.168.1.10"]).expect("解析");
+        assert_eq!(config.server, "192.168.1.10:64738", "端口要自动补上");
+        assert!(config.is_anonymous(), "没有 --user 就是匿名");
     }
 
     #[test]
-    fn defaults_are_the_documented_ones() {
-        let config = parse(&["--user", "alice", "--password", "pw"]).unwrap();
-        assert_eq!(config.server, "127.0.0.1:64738");
-        assert_eq!(config.chain, "highpass,agc2");
-        assert_eq!(config.stats_interval, Some(Duration::from_secs(5)));
-        assert_eq!(config.probe_interval, Some(Duration::from_secs(5)));
-        assert!(config.run_for.is_none(), "默认跑到 Ctrl-C");
-        assert!(!config.insecure, "默认必须校验证书");
-        assert!(!config.dtx);
+    fn a_given_user_switches_to_account_login() {
+        let config = parse(&["--server", "h:1", "--user", "alice"]).expect("解析");
+        assert!(!config.is_anonymous());
+    }
+
+    #[test]
+    fn explicit_anonymous_wins_over_a_leftover_user() {
+        let config = parse(&["--user", "alice", "--anonymous"]).expect("解析");
+        assert!(config.is_anonymous());
+    }
+
+    #[test]
+    fn ports_are_only_added_when_missing() {
+        assert_eq!(server_with_default_port("host"), "host:64738");
+        assert_eq!(server_with_default_port("host:1234"), "host:1234");
+        assert_eq!(server_with_default_port("127.0.0.1"), "127.0.0.1:64738");
     }
 
     #[test]
     fn zero_turns_a_period_off() {
-        let config = parse(&[
-            "--user",
-            "alice",
-            "--password",
-            "pw",
-            "--stats-interval",
-            "0",
-            "--probe-interval",
-            "0",
-        ])
-        .unwrap();
+        let config = parse(&["--stats-interval", "0", "--probe-interval", "0"]).unwrap();
         assert!(config.stats_interval.is_none());
         assert!(config.probe_interval.is_none());
     }
 
     #[test]
     fn server_name_falls_back_to_the_host_part() {
-        let config = parse(&[
-            "--user",
-            "a",
-            "--password",
-            "p",
-            "--server",
-            "voice.example:1234",
-        ])
-        .unwrap();
+        let config = parse(&["--server", "voice.example:1234"]).unwrap();
         assert_eq!(config.server_name(), "voice.example");
-        let config = parse(&["--user", "a", "--password", "p", "--server-name", "other"]).unwrap();
+        let config = parse(&["--server-name", "other"]).unwrap();
         assert_eq!(config.server_name(), "other");
     }
 
     #[test]
+    fn a_device_id_can_be_given_on_the_command_line() {
+        let config = parse(&["--device-id", "A1B2-C3D4-E5F6-7890-1122-3344-5566-7788"]).unwrap();
+        assert_eq!(config.device_id.expect("解析出设备号")[0], 0xA1);
+        assert!(parse(&["--device-id", "nope"]).is_err());
+    }
+
+    #[test]
     fn unknown_flags_are_refused() {
-        assert!(parse(&["--user", "a", "--password", "p", "--nope"]).is_err());
+        assert!(parse(&["--nope"]).is_err());
     }
 }

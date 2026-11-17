@@ -279,9 +279,34 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
     }
 
     // ---- 2. 控制面 + TLS ----
-    let trust = Trust {
-        ca: cfg.ca.clone(),
-        insecure: cfg.insecure,
+    let local = crate::local::open(cfg.db.as_deref())?;
+    let local = std::sync::Arc::new(std::sync::Mutex::new(local));
+    let device_id = {
+        let guard = local.lock().expect("锁没中毒");
+        crate::local::resolve_device_id(&guard, cfg.device_id)?
+    };
+    if cfg.reset_trust {
+        let guard = local.lock().expect("锁没中毒");
+        guard
+            .forget(&cfg.server)
+            .map_err(|e| format!("忘记信任记录失败：{e}"))?;
+        guard
+            .forget_server_token(&cfg.server)
+            .map_err(|e| format!("忘记免密 token 失败：{e}"))?;
+        if !cfg.quiet {
+            println!("已忘掉 {} 的证书指纹与免密 token", cfg.server);
+        }
+    }
+
+    let trust = if cfg.insecure {
+        Trust::Insecure
+    } else if let Some(ca) = &cfg.ca {
+        Trust::Ca(ca.clone())
+    } else {
+        Trust::Tofu {
+            store: std::sync::Arc::clone(&local),
+            host: cfg.server.clone(),
+        }
     };
     let mut control = control::connect(&cfg.server, &trust, cfg.server_name()).await?;
     if cfg.insecure {
@@ -301,11 +326,38 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
     let exporter = control::exporter(&control, client.session_id(), client.voice_token())?;
     client.set_exporter(&exporter, client.key_epoch());
 
-    write_actions(
-        &mut control,
-        vec![client.auth_password(&cfg.user, &cfg.password)],
-    )
-    .await?;
+    // ---- 认证：匿名只要设备号，账号要密码 ----
+    let anonymous = cfg.is_anonymous();
+    let request = if anonymous {
+        if !cfg.quiet {
+            println!(
+                "以设备号匿名登录（{}）",
+                store::client::format_device_id(&device_id)
+            );
+        }
+        client.auth_device_token("", device_id.to_vec())
+    } else {
+        // 先看看上次密码登录有没有留下免密 token：有就先试它，省一次输密码。
+        let stored = {
+            let guard = local.lock().expect("锁没中毒");
+            guard.server_token(&cfg.server).ok().flatten()
+        };
+        let password = if cfg.password.is_empty() {
+            stored
+                .as_ref()
+                .map_or_else(|| prompt_password(&cfg.user), |_| Ok(String::new()))?
+        } else {
+            cfg.password.clone()
+        };
+        if !password.is_empty() {
+            client.auth_password(&cfg.user, &password)
+        } else if let Some(token) = stored {
+            client.auth_device_token(&cfg.user, token)
+        } else {
+            client.auth_password(&cfg.user, &password)
+        }
+    };
+    write_actions(&mut control, vec![request]).await?;
     pump_until(&mut control, &mut client, &mut cbuf, "AuthResult", |c| {
         matches!(c.state(), ClientState::Ready | ClientState::Closed)
     })
@@ -319,10 +371,18 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
         !c.roster().channels().is_empty()
     })
     .await?;
+    // 服务器在密码登录成功时会下发一个设备 token，存下来下次免密。
+    if let Some(token) = client.take_device_token() {
+        let guard = local.lock().expect("锁没中毒");
+        let _ = guard.set_server_token(&cfg.server, &token);
+    }
     if !cfg.quiet {
+        let who = client
+            .roster()
+            .myself()
+            .map_or_else(|| cfg.user.clone(), |me| me.name.clone());
         println!(
-            "已登录：{}（会话 {}，语音标识 {}）",
-            cfg.user,
+            "已登录：{who}（会话 {}，语音标识 {}）",
             client.session_id(),
             client.sender_id()
         );
@@ -964,6 +1024,21 @@ fn percentile(samples: &std::collections::VecDeque<u32>, q: f64) -> Option<u32> 
     let position = q * (sorted.len() - 1) as f64;
     let index = position.round() as usize;
     sorted.get(index.min(sorted.len() - 1)).copied()
+}
+
+/// 交互式问密码（不回显）。非交互时读一行，方便脚本里 echo pw | client。
+fn prompt_password(user: &str) -> Result<String, String> {
+    use std::io::{BufRead, IsTerminal};
+    if std::io::stdin().is_terminal() {
+        return rpassword::prompt_password(format!("{user} 的密码："))
+            .map_err(|e| format!("读密码失败：{e}"));
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("读密码失败：{e}"))?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 /// 把动作变成字节写进控制面。

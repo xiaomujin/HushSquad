@@ -31,10 +31,21 @@ fn main() -> ExitCode {
     }
 
     let config = config.with_env_password();
-    if let Err(message) = config.validate() {
-        eprintln!("参数错误：{message}\n");
-        eprintln!("{}", hushsquad_client::config::USAGE);
-        return ExitCode::from(2);
+
+    // 打印设备号：匿名身份就是它，用户需要能看见（也方便在服务器上核对）。
+    if config.show_device_id {
+        return match hushsquad_client::local::open(config.db.as_deref())
+            .and_then(|store| hushsquad_client::local::resolve_device_id(&store, config.device_id))
+        {
+            Ok(id) => {
+                println!("{}", hushsquad_client::local::describe_device_id(&id));
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("取设备号失败：{message}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     // 单线程运行时：客户端只有一条事件循环，网络与音频都不需要第二个线程

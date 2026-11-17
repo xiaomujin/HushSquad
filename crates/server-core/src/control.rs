@@ -219,6 +219,13 @@ impl Server {
                 username: &p.username,
                 password: &p.password,
             },
+            // 用户名为空 = 只要一个「凭设备号进来」的身份，服务器没见过这个设备就建一个
+            // 匿名账号（协议草案 §12.13）。这条路上没有账号可以「冒名」，所以不需要用户名。
+            Some(pb::auth::Method::DeviceToken(t)) if t.username.is_empty() => {
+                AuthMethod::Anonymous {
+                    token: &t.device_token,
+                }
+            }
             Some(pb::auth::Method::DeviceToken(t)) => AuthMethod::DeviceToken {
                 username: &t.username,
                 token: &t.device_token,
@@ -273,6 +280,9 @@ impl Server {
                             ok: true,
                             user_id: outcome.user_id,
                             perms: outcome.perms,
+                            // 首次密码登录时下发，客户端存下来下次免密；
+                            // 设备号登录时它本来就是客户端给的，不必再回。
+                            device_token: outcome.device_token.clone(),
                             ..Default::default()
                         }),
                     ),
@@ -291,6 +301,8 @@ impl Server {
                         crate::auth::AuthError::BadToken => "bad_token",
                         crate::auth::AuthError::Unsupported => "unsupported",
                         crate::auth::AuthError::Internal => "internal",
+                        crate::auth::AuthError::AnonymousDisabled => "anonymous_disabled",
+                        crate::auth::AuthError::TooManyAnonymous => "too_many_anonymous",
                     },
                 });
                 vec![

@@ -24,11 +24,19 @@ pub enum AuthMethod<'a> {
         /// 密码（只在 TLS 内出现）。
         password: &'a str,
     },
-    /// 用户名 + 设备 token。
+    /// 用户名 + 设备 token（下次免密）。
     DeviceToken {
         /// 用户名。
         username: &'a str,
         /// 上一次登录时下发的 token。
+        token: &'a [u8],
+    },
+    /// 只凭设备号登录。`token` 是本机生成的设备号，服务器没见过就按匿名账号建一个。
+    ///
+    /// 与 [`AuthMethod::DeviceToken`] 的区别是**没有用户名**：这条路上服务器不校验「这个
+    /// token 属于某个指定账号」，而是「这个 token 是谁」——没见过就是新用户。
+    Anonymous {
+        /// 本机设备号（客户端自己生成的随机量）。
         token: &'a [u8],
     },
 }
@@ -42,6 +50,8 @@ pub struct AuthOutcome {
     pub name: String,
     /// 权限位图。
     pub perms: u64,
+    /// 要下发给客户端的设备 token（免密登录用）。空表示不下发。
+    pub device_token: Vec<u8>,
 }
 
 /// 认证失败原因。
@@ -55,6 +65,10 @@ pub enum AuthError {
     BadToken,
     /// 服务器不支持这种方式（例如还没配密码库）。
     Unsupported,
+    /// 这台服务器不接受设备号匿名登录。
+    AnonymousDisabled,
+    /// 匿名账号数已达上限。
+    TooManyAnonymous,
     /// 服务器内部错误（哈希串坏了）。
     Internal,
 }
@@ -66,6 +80,8 @@ impl core::fmt::Display for AuthError {
             Self::BadPassword => "bad password",
             Self::BadToken => "bad token",
             Self::Unsupported => "unsupported method",
+            Self::AnonymousDisabled => "anonymous login is disabled",
+            Self::TooManyAnonymous => "too many anonymous accounts",
             Self::Internal => "internal",
         };
         f.write_str(s)
@@ -233,8 +249,10 @@ impl Authenticator for UserDb {
                     user_id: record.user_id,
                     name: record.username.clone(),
                     perms: record.perms,
+                    device_token: Vec::new(),
                 })
             }
+            AuthMethod::Anonymous { .. } => Err(AuthError::Unsupported),
             AuthMethod::DeviceToken { username, token } => {
                 let Some(record) = self.users.get(username) else {
                     return Err(AuthError::UnknownUser);
@@ -245,6 +263,7 @@ impl Authenticator for UserDb {
                         user_id: record.user_id,
                         name: record.username.clone(),
                         perms: record.perms,
+                        device_token: Vec::new(),
                     }),
                     _ => Err(AuthError::BadToken),
                 }

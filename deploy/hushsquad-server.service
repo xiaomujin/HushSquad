@@ -3,12 +3,14 @@
 # 安装：
 #   useradd --system --home /var/lib/hushsquad --shell /usr/sbin/nologin hushsquad
 #   install -Dm755 target/release/hushsquad-server /usr/local/bin/hushsquad-server
-#   install -d -o hushsquad -g hushsquad /var/lib/hushsquad /etc/hushsquad
-#   cp cert.pem key.pem users.txt /etc/hushsquad/
-#   chown root:hushsquad /etc/hushsquad/key.pem && chmod 0640 /etc/hushsquad/key.pem
+#   install -d -o hushsquad -g hushsquad /var/lib/hushsquad
+#   # 加账号（库与证书会在第一次启动时自动建在 /var/lib/hushsquad 下）
+#   sudo -u hushsquad hushsquad-server --db /var/lib/hushsquad/hushsquad.db adduser 你的名字
 #   systemctl daemon-reload && systemctl enable --now hushsquad-server
 #
-# 证书与用户表的生成见 docs/部署.md。
+# 证书是**第一次启动时自动生成**的自签证书，客户端第一次连会记住它的指纹（TOFU），
+# 所以不需要把 cert.pem 拷来拷去。要换证书就删掉两个 pem 再重启。
+# 详见 docs/部署.md。
 
 [Unit]
 Description=HushSquad voice server (SFU)
@@ -22,15 +24,13 @@ User=hushsquad
 Group=hushsquad
 WorkingDirectory=/var/lib/hushsquad
 ExecStart=/usr/local/bin/hushsquad-server \
-    --users /etc/hushsquad/users.txt \
-    --cert /etc/hushsquad/cert.pem \
-    --key /etc/hushsquad/key.pem \
+    --db /var/lib/hushsquad/hushsquad.db \
+    --cert /var/lib/hushsquad/cert.pem \
+    --key /var/lib/hushsquad/key.pem \
     --control-bind 0.0.0.0:64738 \
     --voice-bind 0.0.0.0:64739 \
     --voice-host voice.example.com \
-    --voice-port 64739 \
-    --channel 大厅 \
-    --channel 游戏 \
+    --channel 大厅 --channel 游戏 \
     --metrics-interval 60
 
 Restart=on-failure
@@ -41,6 +41,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
+# 账号库要可写（匿名登录会建号），只放开这一个目录。
+ReadWritePaths=/var/lib/hushsquad
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

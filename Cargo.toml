@@ -28,6 +28,10 @@ hkdf = "0.13"                                # 语音密钥派生（HKDF-SHA256�
 sha2 = "0.11"                                # hkdf 的哈希后端
 prost = "0.14"                               # 控制面 protobuf 运行时
 argon2 = "0.6"                               # 密码登录校验（argon2id，PHC 字符串）
+# 必须是 0.41+：更早的版本捆绑 SQLite <= 3.53.2，撞 RUSTSEC-2026-0459（CVE-2026-119375，
+# WAL 页大小不一致时可能读到未初始化的页缓存内存）。0.41 捆 SQLite 3.54.1。
+rusqlite = { version = "0.41", features = ["bundled"] }
+rpassword = "7"                              # 终端里不回显地读密码（命令行不再出现明文密码）
 # 构建期依赖：protox 是**纯 Rust** 的 protobuf 编译器，因此 CI/新机器不需要装 protoc。
 # 只有 build.rs 用，不进任何运行时二进制。
 prost-build = "0.14"

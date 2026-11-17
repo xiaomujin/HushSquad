@@ -21,10 +21,15 @@ workspace = true
 protocol = { path = "../../crates/protocol", version = "0.0.0" }
 transport = { path = "../../crates/transport", version = "0.0.0" }
 server-core = { path = "../../crates/server-core", version = "0.0.0" }
+store = { path = "../../crates/store", version = "0.0.0" }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 getrandom = { workspace = true }
+sha2 = { workspace = true }
+argon2 = { workspace = true }
+rpassword = { workspace = true }
+# 证书：第一次启动时自己生成，用户不必再找 openssl。
+rcgen = "0.14"
 
 [dev-dependencies]
-# 只用于集成测试：现场生成一张自签证书，测试不依赖外部 openssl。
-rcgen = "0.14"
+audio-core = { path = "../../crates/audio-core", version = "0.0.0" }

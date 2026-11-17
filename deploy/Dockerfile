@@ -21,6 +21,4 @@ USER hushsquad
 WORKDIR /var/lib/hushsquad
 EXPOSE 64738/tcp 64739/udp
 ENTRYPOINT ["/usr/local/bin/hushsquad-server"]
-CMD ["--users", "/etc/hushsquad/users.txt", \
-     "--cert", "/etc/hushsquad/cert.pem", \
-     "--key", "/etc/hushsquad/key.pem"]
+CMD ["--db", "/var/lib/hushsquad/hushsquad.db"]
