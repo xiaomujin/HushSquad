@@ -8,50 +8,50 @@
   "tone_hz": 1000.0,
   "ticks": 1440000,
   "sender_frames": 1440144,
-  "receiver_frames": 1439998,
-  "drift_samples": 70080,
+  "receiver_frames": 1440000,
+  "drift_samples": 69120,
   "removed_samples": 0,
   "inserted_samples": 0,
   "net_removed_samples": 0,
-  "concealed_samples": 960,
-  "concealment_events": 2,
+  "concealed_samples": 1440,
+  "concealment_events": 3,
   "late_packets": 0,
   "buffer_flushes": 0,
   "jitter_peaks": 0,
   "compensate": true,
-  "drift_excised_samples": 68356,
+  "drift_excised_samples": 68375,
   "drift_inserted_samples": 0,
-  "extra_pulls": 143,
+  "extra_pulls": 144,
   "skipped_pulls": 0,
-  "ring_delta_samples": 284,
-  "packets_queued_mean": 1.0197666342547576,
+  "ring_delta_samples": 265,
+  "packets_queued_mean": 1.018780386164745,
   "packets_queued_min": 1,
   "packets_queued_max": 2,
   "samples_dropped_full": 0,
   "buffered_ms_min": 14.0,
   "buffered_ms_max": 24.0,
-  "buffered_ms_mean": 14.197666342547576,
+  "buffered_ms_mean": 14.18780386164745,
   "buffered_ms_p50": 14.5,
   "buffered_ms_p95": 14.5,
-  "settled_mean_ms": 14.197916666666657,
+  "settled_mean_ms": 14.18802083333332,
   "settled_spread_ms": 10.0,
-  "settled_trend_ms": -0.00416666666666643,
-  "underruns": 2,
+  "settled_trend_ms": -0.00395833333333151,
+  "underruns": 0,
   "warmup_underruns": 0,
   "frames_missing": 0,
   "frames_off_size": 0,
   "soft_steps": 0,
   "hard_steps": 0,
-  "max_step": 0.062316556,
+  "max_step": 0.04816953,
   "step_bound": 0.032701563,
   "drift_trend_ms": 0.0,
   "buffered_first_samples": 672,
   "buffered_last_samples": 672,
-  "steady_drift_samples": 70080,
+  "steady_drift_samples": 69120,
   "steady_removed_samples": 0,
   "steady_inserted_samples": 0,
   "steady_concealed_samples": 0,
-  "fabricated_samples": -1440,
+  "fabricated_samples": -480,
   "windows": [
     {
       "start_s": 2.0,
@@ -62,7 +62,7 @@
       "underruns": 0,
       "hard_steps": 0,
       "removed_ms": 0.0,
-      "concealed_ms": 20.0
+      "concealed_ms": 30.0
     },
     {
       "start_s": 62.0,
@@ -70,7 +70,7 @@
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
-      "underruns": 1,
+      "underruns": 0,
       "hard_steps": 0,
       "removed_ms": 0.0,
       "concealed_ms": 0.0
@@ -88,7 +88,7 @@
     },
     {
       "start_s": 182.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -99,11 +99,11 @@
     },
     {
       "start_s": 242.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
-      "underruns": 1,
+      "underruns": 0,
       "hard_steps": 0,
       "removed_ms": 0.0,
       "concealed_ms": 0.0
@@ -121,7 +121,7 @@
     },
     {
       "start_s": 362.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -143,7 +143,7 @@
     },
     {
       "start_s": 482.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -154,7 +154,7 @@
     },
     {
       "start_s": 542.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -176,7 +176,7 @@
     },
     {
       "start_s": 662.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -198,7 +198,7 @@
     },
     {
       "start_s": 782.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -209,7 +209,7 @@
     },
     {
       "start_s": 842.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -231,7 +231,7 @@
     },
     {
       "start_s": 962.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -253,7 +253,7 @@
     },
     {
       "start_s": 1082.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -264,7 +264,7 @@
     },
     {
       "start_s": 1142.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -286,7 +286,7 @@
     },
     {
       "start_s": 1262.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -308,7 +308,7 @@
     },
     {
       "start_s": 1382.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -319,7 +319,7 @@
     },
     {
       "start_s": 1442.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -341,7 +341,7 @@
     },
     {
       "start_s": 1562.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -363,7 +363,7 @@
     },
     {
       "start_s": 1682.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -374,7 +374,7 @@
     },
     {
       "start_s": 1742.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -396,7 +396,7 @@
     },
     {
       "start_s": 1862.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -418,7 +418,7 @@
     },
     {
       "start_s": 1982.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -429,7 +429,7 @@
     },
     {
       "start_s": 2042.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -451,7 +451,7 @@
     },
     {
       "start_s": 2162.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -473,7 +473,7 @@
     },
     {
       "start_s": 2282.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -484,7 +484,7 @@
     },
     {
       "start_s": 2342.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -506,7 +506,7 @@
     },
     {
       "start_s": 2462.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -528,7 +528,7 @@
     },
     {
       "start_s": 2582.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -539,7 +539,7 @@
     },
     {
       "start_s": 2642.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -561,7 +561,7 @@
     },
     {
       "start_s": 2762.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -583,7 +583,7 @@
     },
     {
       "start_s": 2882.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -594,7 +594,7 @@
     },
     {
       "start_s": 2942.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -616,7 +616,7 @@
     },
     {
       "start_s": 3062.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -638,7 +638,7 @@
     },
     {
       "start_s": 3182.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -649,7 +649,7 @@
     },
     {
       "start_s": 3242.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -671,7 +671,7 @@
     },
     {
       "start_s": 3362.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -693,7 +693,7 @@
     },
     {
       "start_s": 3482.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -704,7 +704,7 @@
     },
     {
       "start_s": 3542.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -726,7 +726,7 @@
     },
     {
       "start_s": 3662.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -748,7 +748,7 @@
     },
     {
       "start_s": 3782.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -759,7 +759,7 @@
     },
     {
       "start_s": 3842.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -781,7 +781,7 @@
     },
     {
       "start_s": 3962.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -803,7 +803,7 @@
     },
     {
       "start_s": 4082.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -814,7 +814,7 @@
     },
     {
       "start_s": 4142.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -836,7 +836,7 @@
     },
     {
       "start_s": 4262.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -858,7 +858,7 @@
     },
     {
       "start_s": 4382.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -869,7 +869,7 @@
     },
     {
       "start_s": 4442.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -891,7 +891,7 @@
     },
     {
       "start_s": 4562.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -913,7 +913,7 @@
     },
     {
       "start_s": 4682.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -924,7 +924,7 @@
     },
     {
       "start_s": 4742.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -946,7 +946,7 @@
     },
     {
       "start_s": 4862.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -968,7 +968,7 @@
     },
     {
       "start_s": 4982.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -979,7 +979,7 @@
     },
     {
       "start_s": 5042.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1001,7 +1001,7 @@
     },
     {
       "start_s": 5162.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1023,7 +1023,7 @@
     },
     {
       "start_s": 5282.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1034,7 +1034,7 @@
     },
     {
       "start_s": 5342.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1056,7 +1056,7 @@
     },
     {
       "start_s": 5462.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1078,7 +1078,7 @@
     },
     {
       "start_s": 5582.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1089,7 +1089,7 @@
     },
     {
       "start_s": 5642.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1111,7 +1111,7 @@
     },
     {
       "start_s": 5762.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1133,7 +1133,7 @@
     },
     {
       "start_s": 5882.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1144,7 +1144,7 @@
     },
     {
       "start_s": 5942.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1166,7 +1166,7 @@
     },
     {
       "start_s": 6062.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1188,7 +1188,7 @@
     },
     {
       "start_s": 6182.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1199,7 +1199,7 @@
     },
     {
       "start_s": 6242.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1221,7 +1221,7 @@
     },
     {
       "start_s": 6362.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1243,7 +1243,7 @@
     },
     {
       "start_s": 6482.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1254,7 +1254,7 @@
     },
     {
       "start_s": 6542.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1276,7 +1276,7 @@
     },
     {
       "start_s": 6662.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1298,7 +1298,7 @@
     },
     {
       "start_s": 6782.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1309,7 +1309,7 @@
     },
     {
       "start_s": 6842.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1331,7 +1331,7 @@
     },
     {
       "start_s": 6962.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1353,7 +1353,7 @@
     },
     {
       "start_s": 7082.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1364,7 +1364,7 @@
     },
     {
       "start_s": 7142.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1386,7 +1386,7 @@
     },
     {
       "start_s": 7262.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1408,7 +1408,7 @@
     },
     {
       "start_s": 7382.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1419,7 +1419,7 @@
     },
     {
       "start_s": 7442.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1441,7 +1441,7 @@
     },
     {
       "start_s": 7562.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1463,7 +1463,7 @@
     },
     {
       "start_s": 7682.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1474,7 +1474,7 @@
     },
     {
       "start_s": 7742.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1496,7 +1496,7 @@
     },
     {
       "start_s": 7862.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1518,7 +1518,7 @@
     },
     {
       "start_s": 7982.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1529,7 +1529,7 @@
     },
     {
       "start_s": 8042.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1551,7 +1551,7 @@
     },
     {
       "start_s": 8162.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1573,7 +1573,7 @@
     },
     {
       "start_s": 8282.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1584,7 +1584,7 @@
     },
     {
       "start_s": 8342.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1606,7 +1606,7 @@
     },
     {
       "start_s": 8462.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1628,7 +1628,7 @@
     },
     {
       "start_s": 8582.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1639,7 +1639,7 @@
     },
     {
       "start_s": 8642.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1661,7 +1661,7 @@
     },
     {
       "start_s": 8762.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1683,7 +1683,7 @@
     },
     {
       "start_s": 8882.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1694,7 +1694,7 @@
     },
     {
       "start_s": 8942.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1716,7 +1716,7 @@
     },
     {
       "start_s": 9062.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1738,7 +1738,7 @@
     },
     {
       "start_s": 9182.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1749,7 +1749,7 @@
     },
     {
       "start_s": 9242.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1771,7 +1771,7 @@
     },
     {
       "start_s": 9362.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1793,7 +1793,7 @@
     },
     {
       "start_s": 9482.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1804,7 +1804,7 @@
     },
     {
       "start_s": 9542.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1826,7 +1826,7 @@
     },
     {
       "start_s": 9662.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1848,7 +1848,7 @@
     },
     {
       "start_s": 9782.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1859,7 +1859,7 @@
     },
     {
       "start_s": 9842.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1881,7 +1881,7 @@
     },
     {
       "start_s": 9962.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1903,7 +1903,7 @@
     },
     {
       "start_s": 10082.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1914,7 +1914,7 @@
     },
     {
       "start_s": 10142.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1936,7 +1936,7 @@
     },
     {
       "start_s": 10262.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1958,7 +1958,7 @@
     },
     {
       "start_s": 10382.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1969,7 +1969,7 @@
     },
     {
       "start_s": 10442.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -1991,7 +1991,7 @@
     },
     {
       "start_s": 10562.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2013,7 +2013,7 @@
     },
     {
       "start_s": 10682.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2024,7 +2024,7 @@
     },
     {
       "start_s": 10742.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2046,7 +2046,7 @@
     },
     {
       "start_s": 10862.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2068,7 +2068,7 @@
     },
     {
       "start_s": 10982.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2079,7 +2079,7 @@
     },
     {
       "start_s": 11042.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2101,7 +2101,7 @@
     },
     {
       "start_s": 11162.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2123,7 +2123,7 @@
     },
     {
       "start_s": 11282.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2134,7 +2134,7 @@
     },
     {
       "start_s": 11342.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2156,7 +2156,7 @@
     },
     {
       "start_s": 11462.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2178,7 +2178,7 @@
     },
     {
       "start_s": 11582.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2189,7 +2189,7 @@
     },
     {
       "start_s": 11642.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2211,7 +2211,7 @@
     },
     {
       "start_s": 11762.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2233,7 +2233,7 @@
     },
     {
       "start_s": 11882.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2244,7 +2244,7 @@
     },
     {
       "start_s": 11942.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2266,7 +2266,7 @@
     },
     {
       "start_s": 12062.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2288,7 +2288,7 @@
     },
     {
       "start_s": 12182.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2299,7 +2299,7 @@
     },
     {
       "start_s": 12242.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2321,7 +2321,7 @@
     },
     {
       "start_s": 12362.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2343,7 +2343,7 @@
     },
     {
       "start_s": 12482.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2354,7 +2354,7 @@
     },
     {
       "start_s": 12542.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2376,7 +2376,7 @@
     },
     {
       "start_s": 12662.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2398,7 +2398,7 @@
     },
     {
       "start_s": 12782.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2409,7 +2409,7 @@
     },
     {
       "start_s": 12842.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2431,7 +2431,7 @@
     },
     {
       "start_s": 12962.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2453,7 +2453,7 @@
     },
     {
       "start_s": 13082.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2464,7 +2464,7 @@
     },
     {
       "start_s": 13142.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2486,7 +2486,7 @@
     },
     {
       "start_s": 13262.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2508,7 +2508,7 @@
     },
     {
       "start_s": 13382.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2519,7 +2519,7 @@
     },
     {
       "start_s": 13442.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2541,7 +2541,7 @@
     },
     {
       "start_s": 13562.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2563,7 +2563,7 @@
     },
     {
       "start_s": 13682.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2574,7 +2574,7 @@
     },
     {
       "start_s": 13742.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2596,7 +2596,7 @@
     },
     {
       "start_s": 13862.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2618,7 +2618,7 @@
     },
     {
       "start_s": 13982.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2629,7 +2629,7 @@
     },
     {
       "start_s": 14042.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2651,7 +2651,7 @@
     },
     {
       "start_s": 14162.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,
@@ -2673,7 +2673,7 @@
     },
     {
       "start_s": 14282.0,
-      "mean_buffered_ms": 14.333333333333334,
+      "mean_buffered_ms": 14.316666666666668,
       "min_buffered_ms": 14.0,
       "max_buffered_ms": 24.0,
       "target_ms": 20,

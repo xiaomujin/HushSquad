@@ -66,7 +66,7 @@ const KP: f32 = 0.02;
 /// 队列是按整包计量的，采样点上天然有 ±1 包的跳变；没有死区的话，滤波后的残余纹波会让
 /// 补偿器每 tick 都做一次 ±1 样本的拼接——实测 4 小时里有 24 % 的样本流过拼接点，
 /// 白白把 `max_step` 抬到平滑上界的 4 倍。
-const DEADBAND_PACKETS: f32 = 0.1;
+const DEADBAND_PACKETS: f32 = 0.05;
 
 /// 每 tick 最多丢/补多少样本。4 个样本 = 0.083 ms，即最多 0.83 % 的瞬时压缩率。
 ///
@@ -76,9 +76,6 @@ const MAX_SLIP: i32 = 2;
 
 /// 交叉淡化长度（样本）。1.33 ms。
 const CROSSFADE: usize = 64;
-
-/// 拉包信用的阈值：累计 480 个样本就多拉/少拉一帧。
-const CREDIT_LIMIT: i32 = FRAME_SAMPLES as i32;
 
 /// 输出缓冲的上限：两帧加最多一次插入。`ReceivePath` 按这个尺寸备缓冲。
 pub const MAX_OUTPUT_SAMPLES: usize = 2 * FRAME_SAMPLES + MAX_SLIP as usize;
@@ -142,7 +139,6 @@ pub struct DriftControl {
     /// 补偿器就完全不动了。
     accum: f32,
     slip: i32,
-    credit: i32,
     history: Frame,
     has_history: bool,
     stats: DriftStats,
@@ -216,14 +212,12 @@ impl DriftControl {
             primed: false,
             accum: 0.0,
             slip: 0,
-            credit: 0,
             history: [0.0; FRAME_SAMPLES],
             has_history: false,
-            // 环水位从 0 开始记账；给一帧垫子，否则第一个 tick 就判成「见底」而去多拉。
-            stats: DriftStats {
-                ring_level: FRAME_SAMPLES as i64,
-                ..DriftStats::default()
-            },
+            // 环水位**如实**从 0 开始记账。之前这里给了「一帧垫子」，等于让估计值比真实
+            // 水位高 480：于是「环太满就少拉」在真实水位只有一帧时就触发，反向漂移下把环
+            // 抽干、把队列推到 18 包。估计值必须等于真实值，垫子要靠多拉真拉出来。
+            stats: DriftStats::default(),
         }
     }
 
@@ -262,26 +256,24 @@ impl DriftControl {
         self.accum -= slip as f32;
         self.slip = slip;
 
-        // 拉包次数：**信用为主，环水位为界**。
+        // 拉包次数**只看 PCM 环水位**，一个规则，没有第二套记账。
         //
-        // 只用信用（slip 的积分）在 4 小时长跑里会把环慢慢撑到溢出——两套记账的误差会累积；
-        // 只看环水位又会丢掉「漂移该拉多少」这个信息，队列会一路涨。两个都要：信用决定
-        // 平均拉包率，环水位只做**硬边界**（见底就补一帧、超过两帧就少拉一帧）。
-        self.credit += self.slip;
+        // 为什么这样就够：环不漂的条件是 `Σslip = 480 × Σ(pulls − 1)`。把「环低于一帧就多拉、
+        // 高于两帧就少拉」当成规则，它的**平均**拉包率就自动等于 `1 + slip/480`——也就是
+        // 漂移量本身。于是 B 由 slip 唯一确定（经由「环不能漂」这个约束），一个控制环就够。
+        //
+        // 前面两版都错在这里：用「信用」（slip 的积分）当主规则时，信用和环水位是两套独立
+        // 记账，误差会累积（4 小时里环涨 136 473 个样本、溢出丢 35 733 个）；两套规则同时
+        // 改 credit 又会互相追（3 分钟 3 910 次多拉 + 3 911 次少拉）。
+        //
+        // 环里始终留一帧垫子：`< 一帧` 就多拉，`> 两帧` 就少拉，于是环恒在 [1 帧, 2 帧]，
+        // 音频侧不会饿，也撑不爆。
         let low = FRAME_SAMPLES as i64;
         let high = 2 * FRAME_SAMPLES as i64;
         let mut plan = PullPlan::One;
-        if self.credit >= CREDIT_LIMIT {
-            self.credit -= CREDIT_LIMIT;
-            plan = PullPlan::Two;
-        } else if self.credit <= -CREDIT_LIMIT && self.has_history {
-            self.credit += CREDIT_LIMIT;
-            plan = PullPlan::Zero;
-        } else if self.stats.ring_level < low {
-            self.credit -= CREDIT_LIMIT;
+        if self.stats.ring_level < low {
             plan = PullPlan::Two;
         } else if self.stats.ring_level > high && self.has_history {
-            self.credit += CREDIT_LIMIT;
             plan = PullPlan::Zero;
         }
         match plan {
@@ -415,18 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn a_queue_at_target_does_nothing() {
+    fn a_queue_at_target_never_splices() {
+        // 队列在目标上时，补偿器一个样本都不许动——这条保证它不会在正常链路上偷偷改音频。
         let mut control = DriftControl::new(DriftConfig::default());
-        let input = tone(1);
         let mut out = [0.0_f32; MAX_OUTPUT_SAMPLES];
         for _ in 0..500 {
             let plan = control.begin_tick(DEFAULT_TARGET_PACKETS as u32);
-            assert_eq!(plan, PullPlan::One, "目标深度上不该多拉或少拉");
-            let len = control.process(&input, &mut out);
-            assert_eq!(len, FRAME_SAMPLES, "目标深度上不该丢样本");
+            let frames = if plan == PullPlan::Two { 2 } else { 1 };
+            let len = control.process(&tone(frames), &mut out);
+            assert_eq!(len, frames * FRAME_SAMPLES, "目标深度上不该丢或补样本");
         }
         assert_eq!(control.stats().excised_samples, 0);
         assert_eq!(control.stats().inserted_samples, 0);
+        // 环水位必须留在 [0, 2 帧] 之内：这是「音频侧不会饿」的硬条件。
+        assert!(
+            (0..=2 * FRAME_SAMPLES as i64).contains(&control.stats().ring_level),
+            "环水位跑出边界：{}",
+            control.stats().ring_level
+        );
     }
 
     #[test]
@@ -452,13 +450,13 @@ mod tests {
     #[test]
     fn a_shallow_queue_inserts_and_skips_pulls() {
         let mut control = DriftControl::new(DriftConfig::default());
-        let input = tone(1);
         let mut out = [0.0_f32; MAX_OUTPUT_SAMPLES];
         let mut saw_zero = false;
-        for _ in 0..400 {
+        for _ in 0..2000 {
             let plan = control.begin_tick(0);
             saw_zero |= plan == PullPlan::Zero;
-            let len = control.process(&input, &mut out);
+            let frames = if plan == PullPlan::Two { 2 } else { 1 };
+            let len = control.process(&tone(frames), &mut out);
             assert!(len >= FRAME_SAMPLES, "缓冲太浅却把输出弄短了");
         }
         assert!(saw_zero, "缓冲见底却一次都没少拉");
