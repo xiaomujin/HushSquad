@@ -29,6 +29,11 @@ cargo clippy -p audio-core --features denoise-dfn3 --all-targets -- -D warnings
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: clippy (denoise-dfn3)" -ForegroundColor Red; exit 1 }
 cargo test -p audio-core --features denoise-dfn3
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: test (denoise-dfn3)" -ForegroundColor Red; exit 1 }
+# testkit 侧的 DFN3 测量（P3-7：音频侧零分配 + 工作线程跟得上实时）。这个测试在
+# `#![cfg(feature = "denoise-dfn3")]` 下才有内容，不加 feature 时 `cargo test --workspace`
+# 只会跑一个空测试——所以必须在这里显式带上 feature 跑一遍。
+cargo test -p testkit --features denoise-dfn3 --test worker
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: test (denoise-dfn3 worker)" -ForegroundColor Red; exit 1 }
 
 Write-Host "==> cargo deny check（许可证 / advisory / 来源 / 禁用 crate）" -ForegroundColor Cyan
 cargo deny check
