@@ -5,12 +5,14 @@
 //! 最后才允许出现在 `ChainDesc` 的档位里——否则报告会写出一个跑不起来的链路。
 
 pub mod agc2;
+pub mod crossfade;
 #[cfg(feature = "denoise-dfn3")]
 pub mod dfn3;
 pub mod highpass;
 pub mod rnn;
 
 pub use agc2::Agc2;
+pub use crossfade::Crossfade;
 #[cfg(feature = "denoise-dfn3")]
 pub use dfn3::Dfn3;
 pub use highpass::Highpass;
