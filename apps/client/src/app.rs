@@ -220,6 +220,9 @@ pub struct App {
 
 /// 一个 tick 超过这个间隔就算「迟到」。10 ms 的节奏留 5 ms 余量。
 const LATE_TICK_MS: u64 = 15;
+
+/// 会话跑够这么久才显示 `pacing=`。估计的分辨率是 `1/Δticks`：5 分钟约 33 ppm。
+const DRIFT_DISPLAY_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 /// 跑一次完整会话：起音频、连服务器、进频道、收发，直到退出。
 pub async fn run(cfg: Config) -> Result<Summary, String> {
     // 必须最先做：Windows 默认定时器粒度 15.6 ms，会把 10 ms 的收发节奏拉成 64 Hz（见 timer 模块）。
@@ -820,8 +823,13 @@ impl App {
         let mut jitter = 0_u32;
         let mut target = 0_u32;
         let mut slip = 0_u64;
-        // 前馈量出来的时钟漂移（ppm）。30 s 之后才有意义，所以起播那几行会显示 +0ppm。
-        let mut drift_ppm = 0.0_f32;
+        // 对端**发包节奏**相对我们 tick 节奏的偏差（`Δ序号 / Δtick − 1`）。
+        //
+        // 注意它量的是「节奏」，不是「晶振」：同一台机器上两个进程用的是同一块时钟，本机回环
+        // 实测却是 −1000 ppm（C-52，原因还没查清）。所以这里叫 `pacing` 不叫 `drift`，
+        // 而且分辨率是 `1/Δticks`（5 分钟 ≈ 33 ppm），前 5 分钟不显示——那是在显示量化噪声。
+        let settled = self.started.elapsed() >= DRIFT_DISPLAY_AFTER;
+        let mut pacing_ppm = 0.0_f32;
         for peer in self.peers.values() {
             let stats = peer.path.stats();
             lost += stats.packets_lost;
@@ -829,9 +837,13 @@ impl App {
             target = target.max(peer.path.target_delay_ms());
             let drift = peer.path.drift_stats();
             slip += drift.excised_samples + drift.inserted_samples;
-            let ppm = peer.path.drift_estimate() * 1e6;
-            if ppm.abs() > drift_ppm.abs() {
-                drift_ppm = ppm;
+            if let Some(estimate) = peer.path.drift_estimate()
+                && settled
+            {
+                let ppm = estimate * 1e6;
+                if ppm.abs() > pacing_ppm.abs() {
+                    pacing_ppm = ppm;
+                }
             }
         }
         let (mix_under, mix_clipped, mix_peak) =
@@ -847,13 +859,18 @@ impl App {
             });
         format!(
             "[stats] t={}s out={}f/{}B in={}f/{}B lost={lost} jitter={jitter}ms \
-             target={target}ms slip={slip} drift={drift_ppm:+.0}ppm mix_under={mix_under} \
+             target={target}ms slip={slip} pacing={} mix_under={mix_under} \
              clip={mix_clipped} peak={mix_peak:.3} rtt={} speaking={}",
             self.started.elapsed().as_secs(),
             self.frames_out,
             self.bytes_out,
             self.frames_in,
             self.bytes_in,
+            if settled {
+                format!("{pacing_ppm:+.0}ppm")
+            } else {
+                "--".to_owned()
+            },
             self.describe_rtt(),
             self.speaking(),
         )

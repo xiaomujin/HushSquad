@@ -326,11 +326,12 @@ impl ReceivePath {
         self.drift = DriftControl::new(config);
     }
 
-    /// 前馈量出来的时钟漂移（比值 − 1）。30 s 之后才有意义，见 [`crate::drift::EPS_MIN_TICKS`]。
+    /// 量出来的时钟漂移（比值 − 1）。没攒够样本时返回 `None`（见 [`crate::drift::EPS_MIN_TICKS`]）。
     ///
-    /// 进客户端统计行：「两端晶振差多少」以前只能靠 4 小时长跑推，现在一行就能看见。
+    /// 「两端晶振差多少」以前只能靠 4 小时长跑推，现在一行就能看见；但分辨率是 `1/Δticks`，
+    /// 所以短会话里它显示的是量化噪声，调用方要自己等得够久再显示。
     #[must_use]
-    pub fn drift_estimate(&self) -> f32 {
+    pub fn drift_estimate(&self) -> Option<f32> {
         self.drift.drift_estimate()
     }
 

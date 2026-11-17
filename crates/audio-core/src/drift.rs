@@ -186,9 +186,14 @@ const CROSSFADE: usize = 64;
 /// 30 s 起用（≈330 ppm 分辨率）就足以把 `±100 ppm` 从「靠反馈环慢慢猜」变成「直接量出来」。
 pub const EPS_MIN_TICKS: u64 = 3_000;
 
-/// 前馈的饱和上限（ppm）。真实晶振不会差过 1 ‰；超过就说明序号统计被打断（中途入会、
-/// 发送方开 DTX 停发、或序号跳变），这时宁可不前馈，交给反馈环。
-const EPS_LIMIT: f32 = 1_000.0;
+/// 漂移估计的饱和上限（**比值**，不是 ppm）。1e-3 = 1000 ppm。
+///
+/// 真实晶振不会差过 1 ‰；超过就说明序号统计被打断（中途入会、发送方开 DTX 停发、
+/// 或序号跳变），这时宁可不前馈，交给反馈环。
+///
+/// 注意单位：这里夹的是 `Δseq/Δticks − 1`，是无量纲比值。写成 `1000.0` 等于没夹
+/// （那就是允许 1000 倍速），实测会漏出去一个 −1500 ppm 的读数。
+const EPS_LIMIT: f32 = 1e-3;
 
 /// 输出缓冲的上限：两帧加最多一次插入。`ReceivePath` 按这个尺寸备缓冲。
 pub const MAX_OUTPUT_SAMPLES: usize = 2 * FRAME_SAMPLES + MAX_SLIP as usize;
@@ -402,10 +407,16 @@ impl DriftControl {
         self.seq_advance = self.seq_advance.saturating_add(packets);
     }
 
-    /// 当前的前馈漂移估计（每秒比值 − 1）。
+    /// 当前的漂移估计（比值 − 1）。还没攒够 [EPS_MIN_TICKS] 时返回 `None`。
+    ///
+    /// **分辨率是 `1/Δticks`**：30 s 时 330 ppm、5 分钟时 33 ppm、1 小时 3 ppm。
+    /// 所以调用方不该在短会话里显示它——那是在显示量化噪声，不是漂移。
     #[must_use]
-    pub fn drift_estimate(&self) -> f32 {
-        self.eps
+    pub fn drift_estimate(&self) -> Option<f32> {
+        match self.seq_start_tick {
+            Some(start) if self.ticks.saturating_sub(start) >= EPS_MIN_TICKS => Some(self.eps),
+            _ => None,
+        }
     }
 
     /// 每 tick 开头调一次：喂当前排队包数，返回本 tick 该拉几帧。
@@ -652,7 +663,12 @@ mod tests {
                 acc -= whole;
             }
             let expected = (ppm * 1e-6) as f32;
-            let got = control.drift_estimate();
+            // 建准之前必须明确说「还没有」，不能吐一个量化噪声给上层去显示。
+            let mut fresh = DriftControl::new(DriftConfig::default());
+            fresh.begin_tick(2);
+            fresh.note_seq_advance(1);
+            assert_eq!(fresh.drift_estimate(), None);
+            let got = control.drift_estimate().expect("20 万 tick 后应当已经建准");
             // 200 000 个 tick 的分辨率是 5 ppm，给 20 ppm 的余量。
             assert!(
                 (got - expected).abs() < 20e-6,
