@@ -23,6 +23,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-deny
 
+      # 为什么必须装：cpal 0.18 在 Linux 上的 ALSA 后端是**非可选**依赖
+      # （Cargo.toml 里 `[target.'cfg(target_os = "linux")'.dependencies] alsa = "0.11"`，
+      # 没有 optional 标记），而 alsa-sys 的 build script 用 pkg-config 找 alsa.pc。
+      # ubuntu-latest 镜像**不带** libasound2-dev，于是 `cargo clippy` 在编译 cpal 时就
+      # 以 101 退出——那是机器缺库，不是代码有问题（Windows 上走 WASAPI，不碰这条路，
+      # 所以本机 scripts/check.ps1 全绿也发现不了）。
+      # 装完之后 cpal / audio-io 在 Linux 上能编过，门禁才谈得上「检查代码」。
+      - name: 系统依赖（Linux 上 cpal 必须链 ALSA）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
+
       - name: rustfmt
         run: cargo fmt --all -- --check
 
