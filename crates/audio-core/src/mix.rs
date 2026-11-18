@@ -1,8 +1,8 @@
-//! 混音（P4-5）：8 路 PCM → 一路输出，带**按人音量 / 静音 / 独听**。
+//! 混音（P4-5）：多路 PCM → 一路输出，带**按人音量 / 静音 / 独听**。
 //!
 //! # 为什么混音必须在音频线程上、而且零分配
 //!
-//! 8 路的抖动缓冲各自解出 PCM（P4-2），混音是最后一公里。它跑在音频回调里，所以：
+//! 每路的抖动缓冲各自解出 PCM（P4-2），混音是最后一公里。它跑在音频回调里，所以：
 //!
 //! - 轨数上限是**编译期常数** [`MAX_TRACKS`]，槽位是定长数组，不扩容；
 //! - 控制指令（音量/静音/独听/增删轨）走**无锁环**，音频侧只 `pop`，不加锁不分配；
@@ -24,7 +24,7 @@
 //!
 //! # 削波：静态软限幅，不做动态压缩
 //!
-//! 8 路叠加必然可能超过满量程。两条路：
+//! 多路叠加必然可能超过满量程（32 路上限时更甚）。两条路：
 //!
 //! - **动态限幅器**（带攻击/释放）：波形保住了，但增益会随内容起伏，多人同时说话时听感是「抽气」；
 //! - **静态软限幅**（本实现）：拐点 [`SOFT_KNEE`]（约 −3 dBFS）以下**完全不动**，以上按 `tanh` 曲线
@@ -39,8 +39,12 @@ use std::sync::{Arc, Mutex};
 use crate::receive::PcmReceiver;
 use crate::{FRAME_SAMPLES, Frame};
 
-/// 最大轨数（v1 的房间上限）。
-pub const MAX_TRACKS: usize = 8;
+/// 最大轨数。
+///
+/// UI 不设人数上限（2026-11-18 决定），这里是混音器的**定长容量**：32 路足以覆盖
+/// 「小队语音」的全部真实场景，而槽位仍是预分配数组，音频回调里不扩容。
+/// 超出的成员在混音侧拿不到槽位，必须由上层拒绝加入或降级为「只听混音」。
+pub const MAX_TRACKS: usize = 32;
 
 /// 音量下限（dB）。到下限当静音处理。
 pub const MIN_GAIN_DB: f32 = -60.0;
@@ -619,6 +623,39 @@ mod tests {
         assert!(
             frame.iter().all(|x| x.abs() > 0.99),
             "2.0 的输入应当被压到接近满量程"
+        );
+    }
+
+    #[test]
+    fn thirty_two_tracks_reach_the_knee_but_never_clip() {
+        // 容量从 8 提到 32 之后，「32 人同时说话」就不再是极限场景：32 × 0.05 = 1.6，
+        // 会按设计触发软限幅。这条测试钉住两件事：① 仍然没有硬削（任何样本不超过 ±1）；
+        // ② 过载量被如实计数，UI 才能提示「混音过载」。
+        let (mut mixer, control) = mixer();
+        for slot in 0..MAX_TRACKS {
+            control
+                .add_track(slot, FakeSource::dc(0.05, 4))
+                .expect("加轨失败");
+        }
+        let mut frame: Frame = [0.0; FRAME_SAMPLES];
+        mixer.mix(&mut frame);
+        let stats = mixer.mix(&mut frame);
+        assert!(
+            frame.iter().all(|x| x.abs() <= 1.0),
+            "32 路叠加也不许有样本超过满量程"
+        );
+        assert!(
+            stats.peak > 1.0,
+            "32 × 0.05 = 1.6，峰值应当超过满量程（实际 {}）",
+            stats.peak
+        );
+        assert_eq!(
+            stats.clipped_samples, FRAME_SAMPLES as u32,
+            "整帧都该进软限幅"
+        );
+        assert!(
+            frame.iter().all(|x| x.abs() > 0.9),
+            "限幅后仍应接近满量程，而不是被压成静音"
         );
     }
 

@@ -14,6 +14,9 @@ use audio_core::{
 use testkit::alloc;
 
 const FRAMES: usize = 200;
+/// 这条测试钉的是「8 路真实链路」的原始场景，所以不用 MAX_TRACKS：
+/// 容量提到 32 之后，32 × 0.05 = 1.6 会按设计触发软限幅，那是另一件事（见 soft_limiter_...）。
+const TRACKS: usize = 8;
 const SENDER_BASE: u32 = 0x1000;
 
 fn tone(frequency: f32, frame_index: usize, amplitude: f32) -> Frame {
@@ -32,7 +35,7 @@ fn eight_real_tracks_mix_without_allocating_on_the_audio_side() {
     // 8 条完整接收链：每路一个发送方、一个抖动缓冲、一条 PCM 环。
     let mut senders = Vec::new();
     let mut paths = Vec::new();
-    for slot in 0..MAX_TRACKS {
+    for slot in 0..TRACKS {
         let sender = SENDER_BASE + slot as u32;
         let (tx, path, pcm) = ReceivePath::new(sender, 64, 8).expect("构造接收路径");
         control.add_track(slot, Box::new(pcm)).expect("加轨失败");
@@ -79,7 +82,7 @@ fn eight_real_tracks_mix_without_allocating_on_the_audio_side() {
     }
 
     println!(
-        "{FRAMES} 帧 × {MAX_TRACKS} 路：混音 {:.4} ms/帧、分配 {audio_allocations} 次、峰值 {peak:.3}",
+        "{FRAMES} 帧 × {TRACKS} 路：混音 {:.4} ms/帧、分配 {audio_allocations} 次、峰值 {peak:.3}",
         audio_seconds * 1_000.0 / FRAMES as f64
     );
 

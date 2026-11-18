@@ -45,7 +45,7 @@ pub const USAGE: &str = r"HushSquad 客户端
   --speaker <设备名>      扬声器（同上）
   --no-mic                不开麦克风（只听）
   --no-speaker            不开扬声器（只发）
-  --chain <档位串>        上行处理链（默认 highpass,agc2；none 表示直通）
+  --chain <档位串>        上行处理链（默认 highpass,rnn,agc2；none 表示直通）
   --dtx                   静音时不发包（省流量，但对方的抖动缓冲要能撑住）
   --tone <Hz>             用合成正弦音代替麦克风（验证链路用，不需要声卡）
   --jitter-min <毫秒>     抖动缓冲目标延迟下限（默认 20）
@@ -147,7 +147,7 @@ impl Default for Config {
             speaker: None,
             no_mic: false,
             no_speaker: false,
-            chain: "highpass,agc2".to_owned(),
+            chain: "highpass,rnn,agc2".to_owned(),
             dtx: false,
             tone: None,
             jitter_min_ms: 20,

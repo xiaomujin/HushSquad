@@ -75,9 +75,15 @@ body{padding:24px 0 64px}
 .server .s-ad{font-size:11px;color:var(--tx3)}
 .server .s-mt{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--tx2);margin-top:7px}
 .side-sec.grow{flex:1;overflow:hidden}
-.ch{display:flex;align-items:center;gap:8px;height:32px;padding:0 9px;border-radius:6px;color:var(--tx2);
+.ch{display:flex;align-items:center;gap:6px;height:30px;padding:0 9px 0 calc(9px + var(--d,0) * 14px);border-radius:6px;color:var(--tx2);
   font-size:12.5px;cursor:default;margin-bottom:2px}
 .ch .hash{color:var(--tx3);font-size:13px}
+.ch .caret{width:11px;height:11px;flex:0 0 auto;position:relative}
+.ch .caret.down::before{content:"";position:absolute;left:3px;top:4px;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--tx3)}
+.ch .caret.right::before{content:"";position:absolute;left:4px;top:3px;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:5px solid var(--tx3)}
+.ch:hover .caret.down::before,.ch:hover .caret.right::before{border-top-color:var(--tx2);border-left-color:var(--tx2)}
+.ch.cat{height:24px;margin-top:8px;font-size:11px;letter-spacing:.08em;color:var(--tx3);font-weight:500}
+.ch.cat:hover{color:var(--tx2);background:transparent}
 .ch .n{margin-left:auto;font-size:11px;color:var(--tx3);font-family:var(--mono)}
 .ch:hover{background:var(--surf);color:var(--tx)}
 .ch.on{background:var(--surf2);color:var(--tx);box-shadow:inset 2px 0 0 var(--acc)}
@@ -147,6 +153,8 @@ body{padding:24px 0 64px}
   color:var(--tx3);font-size:11px;opacity:.45}
 .bar{width:104px;height:3px;border-radius:2px;background:var(--surf3);overflow:hidden}
 .bar i{display:block;height:100%;background:var(--acc);border-radius:2px}
+.t-ctl{display:flex;align-items:center;gap:6px;width:100%;justify-content:center;margin-top:8px}
+.t-ctl input[type=range]{width:88px}
 .t-vol{display:flex;align-items:center;gap:7px;width:100%;justify-content:center;margin-top:2px}
 .t-vol input[type=range]{width:86px}
 .t-vol .v{font-size:10.5px;color:var(--tx3);width:26px;text-align:right}
@@ -154,7 +162,7 @@ body{padding:24px 0 64px}
   border-radius:5px;padding:2px 7px;cursor:pointer}
 .mini:hover{color:var(--tx);border-color:var(--line2)}
 
-input[type=range]{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;background:var(--surf3);outline:none}
+input[type=range]{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;background:#333d49;outline:none}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;
   background:var(--tx2);border:0;cursor:pointer}
 input[type=range]::-webkit-slider-thumb:hover{background:var(--tx)}
@@ -415,12 +423,17 @@ body.solo .frame{zoom:1}
       </div>
       <div class="side-sec grow">
         <div class="side-h">频道</div>
-        <div class="ch on"><span class="hash">#</span>大厅
+        <div class="ch cat"><span class="caret down"></span>常用</div>
+        <div class="ch on" style="--d:1"><span class="caret"></span><span class="hash">#</span>大厅
           <span class="spk"><i style="height:4px"></i><i style="height:9px"></i><i style="height:6px"></i></span>
           <span class="n">3</span></div>
-        <div class="ch"><span class="hash">#</span>团战<span class="n">0</span></div>
-        <div class="ch"><span class="hash">#</span>挂机<span class="n">1</span></div>
-      </div>
+        <div class="ch" style="--d:1"><span class="caret down"></span><span class="hash">#</span>团战<span class="n">3</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>一队<span class="n">2</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>二队<span class="n">1</span></div>
+        <div class="ch cat"><span class="caret down"></span>挂机区</div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>挂机<span class="n">1</span></div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>听歌<span class="n">0</span></div>
+        <div class="ch cat"><span class="caret right"></span>活动<span class="n">2</span></div>      </div>
       <div class="me">
         <div class="ava sm a1">木</div>
         <div class="me-tx">
@@ -448,6 +461,7 @@ body.solo .frame{zoom:1}
           <div class="t-nm">小木 <span class="badge you">你</span></div>
           <div class="t-sub mono">上行 32 kbps</div>
           <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl"><button class="mini">静音自己</button><button class="mini">闭听</button></div>
         </div>
 
         <div class="tile speaking">
@@ -455,14 +469,21 @@ body.solo .frame{zoom:1}
           <div class="t-nm">老K</div>
           <div class="t-sub mono">−21 dBFS</div>
           <div class="bar"><i style="width:64%"></i></div>
+          <div class="t-ctl">
+            <input type="range" value="100" aria-label="老K音量">
+            <button class="mini">静音</button>
+            <button class="mini">独听</button>
+          </div>
         </div>
 
         <div class="tile muted">
           <div class="ava big a2">岚</div>
           <div class="t-nm">阿岚 <span class="badge mute">静音</span></div>
-          <div class="t-vol">
+          <div class="t-sub mono">80 %</div>
+          <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl">
             <input type="range" value="80" aria-label="阿岚音量">
-            <span class="v mono">80</span>
+            <button class="mini">取消静音</button>
             <button class="mini">独听</button>
           </div>
         </div>
@@ -521,12 +542,17 @@ body.solo .frame{zoom:1}
       </div>
       <div class="side-sec grow">
         <div class="side-h">频道</div>
-        <div class="ch on"><span class="hash">#</span>大厅
-          <span class="spk"><i style="height:7px"></i><i style="height:11px"></i><i style="height:9px"></i></span>
+        <div class="ch cat"><span class="caret down"></span>常用</div>
+        <div class="ch on" style="--d:1"><span class="caret"></span><span class="hash">#</span>大厅
+          <span class="spk"><i style="height:4px"></i><i style="height:9px"></i><i style="height:6px"></i></span>
           <span class="n">3</span></div>
-        <div class="ch"><span class="hash">#</span>团战<span class="n">0</span></div>
-        <div class="ch"><span class="hash">#</span>挂机<span class="n">1</span></div>
-      </div>
+        <div class="ch" style="--d:1"><span class="caret down"></span><span class="hash">#</span>团战<span class="n">3</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>一队<span class="n">2</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>二队<span class="n">1</span></div>
+        <div class="ch cat"><span class="caret down"></span>挂机区</div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>挂机<span class="n">1</span></div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>听歌<span class="n">0</span></div>
+        <div class="ch cat"><span class="caret right"></span>活动<span class="n">2</span></div>      </div>
       <div class="me">
         <div class="ava sm a1">木</div>
         <div class="me-tx">
@@ -554,6 +580,7 @@ body.solo .frame{zoom:1}
           <div class="t-nm">小木 <span class="badge you">你</span></div>
           <div class="t-sub mono">−14 dBFS · 发送中</div>
           <div class="bar"><i style="width:72%"></i></div>
+          <div class="t-ctl"><button class="mini">静音自己</button><button class="mini">闭听</button></div>
         </div>
 
         <div class="tile idle">
@@ -561,14 +588,21 @@ body.solo .frame{zoom:1}
           <div class="t-nm">老K</div>
           <div class="t-sub">在听</div>
           <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl">
+            <input type="range" value="100" aria-label="老K音量">
+            <button class="mini">静音</button>
+            <button class="mini">独听</button>
+          </div>
         </div>
 
         <div class="tile muted">
           <div class="ava big a2">岚</div>
           <div class="t-nm">阿岚 <span class="badge mute">静音</span></div>
-          <div class="t-vol">
+          <div class="t-sub mono">80 %</div>
+          <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl">
             <input type="range" value="80" aria-label="阿岚音量">
-            <span class="v mono">80</span>
+            <button class="mini">取消静音</button>
             <button class="mini">独听</button>
           </div>
         </div>
@@ -805,10 +839,16 @@ body.solo .frame{zoom:1}
       </div>
       <div class="side-sec grow stale">
         <div class="side-h">频道</div>
-        <div class="ch on"><span class="hash">#</span>大厅<span class="n">3</span></div>
-        <div class="ch"><span class="hash">#</span>团战<span class="n">—</span></div>
-        <div class="ch"><span class="hash">#</span>挂机<span class="n">—</span></div>
-      </div>
+        <div class="ch cat"><span class="caret down"></span>常用</div>
+        <div class="ch on" style="--d:1"><span class="caret"></span><span class="hash">#</span>大厅
+          <span class="n">3</span></div>
+        <div class="ch" style="--d:1"><span class="caret down"></span><span class="hash">#</span>团战<span class="n">3</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>一队<span class="n">2</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>二队<span class="n">1</span></div>
+        <div class="ch cat"><span class="caret down"></span>挂机区</div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>挂机<span class="n">1</span></div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>听歌<span class="n">—</span></div>
+        <div class="ch cat"><span class="caret right"></span>活动<span class="n">2</span></div>      </div>
       <div class="me">
         <div class="ava sm a1">木</div>
         <div class="me-tx">
@@ -836,18 +876,29 @@ body.solo .frame{zoom:1}
           <div class="t-nm">小木 <span class="badge you">你</span></div>
           <div class="t-sub">状态未知</div>
           <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl"><button class="mini">静音自己</button><button class="mini">闭听</button></div>
         </div>
         <div class="tile">
           <div class="ava big a3">K</div>
           <div class="t-nm">老K</div>
           <div class="t-sub">状态未知</div>
           <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl">
+            <input type="range" value="100" aria-label="老K音量">
+            <button class="mini">静音</button>
+            <button class="mini">独听</button>
+          </div>
         </div>
         <div class="tile">
           <div class="ava big a2">岚</div>
           <div class="t-nm">阿岚</div>
           <div class="t-sub">状态未知</div>
           <div class="bar"><i style="width:0%"></i></div>
+          <div class="t-ctl">
+            <input type="range" value="80" aria-label="阿岚音量">
+            <button class="mini">静音</button>
+            <button class="mini">独听</button>
+          </div>
         </div>
       </div>
       <div class="note" style="max-width:520px">恢复后会自动回到「大厅」，不需要重新选频道。这段时间的语音不会补发。</div>
@@ -905,12 +956,17 @@ body.solo .frame{zoom:1}
       </div>
       <div class="side-sec grow">
         <div class="side-h">频道</div>
-        <div class="ch on"><span class="hash">#</span>大厅
+        <div class="ch cat"><span class="caret down"></span>常用</div>
+        <div class="ch on" style="--d:1"><span class="caret"></span><span class="hash">#</span>大厅
           <span class="spk"><i style="height:4px"></i><i style="height:9px"></i><i style="height:6px"></i></span>
           <span class="n">12</span></div>
-        <div class="ch"><span class="hash">#</span>团战<span class="n">0</span></div>
-        <div class="ch"><span class="hash">#</span>挂机<span class="n">1</span></div>
-      </div>
+        <div class="ch" style="--d:1"><span class="caret down"></span><span class="hash">#</span>团战<span class="n">3</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>一队<span class="n">2</span></div>
+        <div class="ch" style="--d:2"><span class="caret"></span><span class="hash">#</span>二队<span class="n">1</span></div>
+        <div class="ch cat"><span class="caret down"></span>挂机区</div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>挂机<span class="n">1</span></div>
+        <div class="ch" style="--d:1"><span class="caret"></span><span class="hash">#</span>听歌<span class="n">0</span></div>
+        <div class="ch cat"><span class="caret right"></span>活动<span class="n">2</span></div>      </div>
       <div class="me">
         <div class="ava sm a1">木</div>
         <div class="me-tx">
