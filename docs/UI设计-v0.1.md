@@ -186,7 +186,6 @@ VAD 触发到界面变绿 ≤ 50 ms，否则用户会重复说第一句。做不
 | 列表/网格切换 | — | 纯前端状态，无 Rust 侧依赖 |
 
 ## 7. 已定（2026-11-18 第三轮）
-
 1. **分组用 `flags` bit 3（值 8）**：`ChannelState.flags & 8` = 分组容器，**不可加入**。
    proto 注释已更新，服务器 `on_join_channel` 会回 `PERMISSION_DENIED`（"这是分组，不能加入"），
    有测试钉住「被拒之后会话不留在任何频道里」。
@@ -212,3 +211,26 @@ start "docs/ui/mockup.html?only=1&s=6"          # 只看某一屏
   --screenshot=docs/ui/shots/s6.png `
   "file:///D:/Projects/RustroverProjects/HushSquad/docs/ui/mockup.html?only=1&s=6"
 ```
+
+---
+
+## 8. 实现状态（2026-11-19）
+
+前端已经按 `ADR-0013` 落地为 **Svelte 5 + Vite + TS**，代码在 [`ui/`](../ui/README.md)，
+截图在 `docs/ui/shots/app-*.png`（真实渲染，不是稿子）。
+
+| 项 | 状态 |
+|---|---|
+| 连接页（地址 / 匿名 / 指纹） | ✅ 已实现 |
+| 频道树（分组 → 频道 → 子频道、折叠、子树人数） | ✅ 已实现（`src/lib/tree.ts` 有纯函数） |
+| 成员网格 / 列表双视图 | ✅ 已实现，频道头切换 |
+| 按人音量 / 静音 / 独听（常显） | ✅ 已实现 |
+| 语音激活状态灯 + 麦克风电平 | ✅ 已实现（20 Hz 合并推送） |
+| 网络面板（软件预算 / 实时 / 自检） | ✅ 已实现，口径按 `ADR-0010` |
+| 设置页 | ✅ 骨架（设备、四档、三种说话方式、自检占位） |
+| 后端 | ⚠️ 目前是 `MockBackend`（假数据、可交互）；Tauri 壳接进来后换 `TauriBackend` |
+| 重连态 | ✅ 界面已支持（`phase === 'reconnecting'`），后端还没产生这个状态 |
+
+`pnpm check` = 0 errors / 0 warnings；`pnpm build` = 67 KB JS（gzip 26 KB）+ 18 KB CSS。
+
+**还没做的**：Tauri 窗口（`apps/app`）、真实 IPC、设备枚举、设置页的落盘。

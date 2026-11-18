@@ -1,0 +1,6 @@
+allowBuilds:
+  esbuild: true
+# pnpm 11 起，构建脚本白名单写在 pnpm-workspace.yaml（package.json 里的 pnpm 字段已不再读取）。
+# esbuild 需要跑 postinstall 装平台二进制，否则 vite build 会缺可执行文件。
+onlyBuiltDependencies:
+  - esbuild
