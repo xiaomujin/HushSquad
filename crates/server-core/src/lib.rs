@@ -73,7 +73,7 @@ impl Default for ServerConfig {
         Self {
             max_voice_pps: 150,
             max_control_msgs_per_sec: 50,
-            max_channel_users: 64,
+            max_channel_users: 32,
             max_sessions: 256,
             // 10 个包 = 100 ms 的连续伪造。正常网络抖动不会连错 10 个。
             auth_failure_limit: 10,
@@ -83,7 +83,7 @@ impl Default for ServerConfig {
                 max_control_msgs_per_sec: 50,
                 max_voice_pps: 150,
                 max_voice_payload_bytes: 400,
-                max_channel_users: 64,
+                max_channel_users: 32,
                 max_listening_channels: 8,
                 ping_interval_ms: 15_000,
                 ping_timeout_ms: 45_000,

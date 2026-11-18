@@ -375,3 +375,31 @@ fn epochs_only_move_forward_on_membership_changes() {
     send_control(&mut s, a.id, Kind::Ping(pb::Ping { ts_us: 1 }), 0);
     assert_eq!(s.channel(lobby).unwrap().epoch, after);
 }
+#[test]
+fn joining_a_group_container_is_refused() {
+    // 分组（flags bit 3）只用来聚合子频道，不能加入。
+    let mut s = server();
+    let group = s.add_channel(0, "常用");
+    s.channel_mut(group).unwrap().flags |= server_core::channel::FLAG_CONTAINER;
+    let a = join(&mut s, "alice", "alice-pw", 1);
+
+    let actions = join_channel(&mut s, a.id, group);
+    let msgs = sent_messages(&actions);
+    assert_eq!(kind_of(msgs[0].1), "error");
+    let Some(Kind::Error(err)) = &msgs[0].1.kind else {
+        unreachable!()
+    };
+    assert_eq!(err.code, pb::ErrorCode::PermissionDenied as u32);
+    assert!(
+        s.session(a.id).unwrap().channel.is_none(),
+        "被拒绝之后不该留在任何频道里"
+    );
+}
+
+#[test]
+fn default_channel_cap_matches_the_mixer() {
+    // 每频道默认 32 人，与 audio-core::mix::MAX_TRACKS 对齐：
+    // 满员时每个客户端最多混 31 路远端，仍落在 32 个槽位以内。
+    // 这条数字是跨 crate 的约定，改一边就必须改另一边。
+    assert_eq!(ServerConfig::default().max_channel_users, 32);
+}

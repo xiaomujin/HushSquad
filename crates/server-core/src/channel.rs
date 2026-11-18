@@ -11,6 +11,11 @@ pub type ChannelId = u32;
 /// 用户标识（账号级，跨会话稳定）。
 pub type UserId = u32;
 
+/// `flags` 位：分组容器。**不可加入**，只用来聚合子频道（2026-11-18 决定）。
+///
+/// 现有位：1=临时频道 2=需要密码 4=只允许监听 8=分组。
+pub const FLAG_CONTAINER: u64 = 8;
+
 /// 一个频道。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
@@ -61,6 +66,12 @@ impl Channel {
         }
     }
 
+    /// 是不是分组容器（不可加入）。
+    #[must_use]
+    pub const fn is_container(&self) -> bool {
+        self.flags & FLAG_CONTAINER != 0
+    }
+
     /// 还能不能再进人。
     #[must_use]
     pub fn has_room(&self, server_default: u32) -> bool {
@@ -82,5 +93,13 @@ mod tests {
         c.members.insert(1);
         c.members.insert(2);
         assert!(!c.has_room(64));
+    }
+
+    #[test]
+    fn container_flag_is_recognised() {
+        let mut c = Channel::new(1, 0, "常用");
+        assert!(!c.is_container());
+        c.flags = FLAG_CONTAINER | 2; // 分组 + 需要密码，位可以叠加
+        assert!(c.is_container());
     }
 }

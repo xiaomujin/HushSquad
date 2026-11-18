@@ -340,6 +340,12 @@ impl Server {
                 error_msg(pb::ErrorCode::ChannelNotFound, "频道不存在", false),
             )];
         };
+        if channel.is_container() {
+            return vec![Action::send(
+                session_id,
+                error_msg(pb::ErrorCode::PermissionDenied, "这是分组，不能加入", false),
+            )];
+        }
         if !channel.has_room(self.config().max_channel_users) {
             return vec![Action::send(
                 session_id,

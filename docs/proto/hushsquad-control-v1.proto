@@ -134,7 +134,7 @@ message ChannelState {
   string name       = 3;
   uint32 position   = 4;   // 同级排序
   uint32 max_users  = 5;   // 0 表示用服务器默认
-  uint64 flags      = 6;   // 位：1=临时频道 2=需要密码 4=只允许监听
+  uint64 flags      = 6;   // 位：1=临时频道 2=需要密码 4=只允许监听 8=分组（不可加入）
   string description = 7;
   uint32 channel_epoch = 8; // 成员快照版本，与语音包头部对应
 }
