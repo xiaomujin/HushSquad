@@ -1,0 +1,894 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>静队 HushSquad · UI 稿 v0.1</title>
+<style>
+/* ============================================================
+   静队 HushSquad — 桌面 UI 稿 v0.1（2026-11-18）
+   设计前提：1440×900 窗口、Tauri 2、Windows 优先。
+   所有数字取自 docs/measurements.md（软件预算 ≈22.5 ms，
+   设备段 175 ms 单列，见 ADR-0010）。
+   ============================================================ */
+
+:root{
+  --bg:#0b0e11; --win:#10141a; --surf:#151a20; --surf2:#1b2129; --surf3:#232b34;
+  --line:#242c36; --line2:#2e3844;
+  --tx:#e8ecf1; --tx2:#98a3b0; --tx3:#68727f;
+  --acc:#5fe3a1; --acc-dim:#2b6b4d; --acc-bg:rgba(95,227,161,.12);
+  --warn:#e8b45c; --warn-bg:rgba(232,180,92,.12);
+  --danger:#f2686d; --danger-bg:rgba(242,104,109,.12);
+  --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  --ui:"Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;
+  --r:10px;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--tx);font-family:var(--ui);font-size:13px;-webkit-font-smoothing:antialiased}
+body{padding:24px 0 64px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ---- 浏览用的切换条（截图时隐藏） ---- */
+.switcher{position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:9;display:flex;gap:6px;
+  background:#12171d;border:1px solid var(--line);border-radius:999px;padding:5px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.switcher button{font:inherit;font-size:12px;color:var(--tx2);background:transparent;border:0;border-radius:999px;
+  padding:6px 14px;cursor:pointer}
+.switcher button.on{background:var(--surf3);color:var(--tx)}
+.switcher button:hover{color:var(--tx)}
+
+.stage{display:flex;flex-direction:column;align-items:center;gap:18px}
+.cap{font-size:12px;color:var(--tx3);letter-spacing:.02em}
+.frame{display:none;width:1440px;height:900px;zoom:var(--k,1);flex:0 0 auto}
+.frame.on{display:block}
+
+/* ---- 窗口 ---- */
+.win{width:1440px;height:900px;background:var(--win);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:grid;grid-template-rows:48px 1fr 92px;grid-template-columns:264px 1fr 56px;
+  box-shadow:0 24px 80px rgba(0,0,0,.6)}
+.win.wide{grid-template-columns:264px 1fr 320px}
+
+/* ---- 顶栏 ---- */
+.top{grid-column:1/-1;display:flex;align-items:center;gap:14px;padding:0 14px 0 16px;
+  border-bottom:1px solid var(--line);background:linear-gradient(180deg,#12171d,#10141a)}
+.brand{display:flex;align-items:center;gap:9px}
+.brand .nm{font-size:14px;font-weight:600;letter-spacing:.04em}
+.brand .en{font-size:11px;color:var(--tx3);letter-spacing:.14em;text-transform:uppercase}
+.top-mid{display:flex;align-items:center;gap:8px;margin-left:10px}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:6px;
+  background:var(--surf2);border:1px solid var(--line);color:var(--tx2);font-size:11.5px;white-space:nowrap}
+.chip.live{color:var(--acc);border-color:var(--acc-dim);background:var(--acc-bg)}
+.chip.warn{color:var(--warn);border-color:#5a462a;background:var(--warn-bg)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--tx3);flex:0 0 auto}
+.dot.ok{background:var(--acc);box-shadow:0 0 8px rgba(95,227,161,.7)}
+.dot.bad{background:var(--danger)}
+.icon-btn{width:28px;height:28px;border-radius:6px;background:transparent;border:1px solid transparent;
+  color:var(--tx2);cursor:pointer;display:grid;place-items:center;font-size:14px}
+.icon-btn:hover{background:var(--surf2);border-color:var(--line);color:var(--tx)}
+
+/* ---- 左栏 ---- */
+.side{border-right:1px solid var(--line);display:flex;flex-direction:column;padding:12px 10px;gap:14px;
+  background:#0f1318;overflow:hidden}
+.side-h{font-size:10.5px;letter-spacing:.14em;color:var(--tx3);text-transform:uppercase;padding:0 6px 6px}
+.server{background:var(--surf);border:1px solid var(--line);border-radius:8px;padding:10px 11px}
+.server .s-nm{font-size:12.5px;font-weight:600;margin-bottom:3px}
+.server .s-ad{font-size:11px;color:var(--tx3)}
+.server .s-mt{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--tx2);margin-top:7px}
+.side-sec.grow{flex:1;overflow:hidden}
+.ch{display:flex;align-items:center;gap:8px;height:32px;padding:0 9px;border-radius:6px;color:var(--tx2);
+  font-size:12.5px;cursor:default;margin-bottom:2px}
+.ch .hash{color:var(--tx3);font-size:13px}
+.ch .n{margin-left:auto;font-size:11px;color:var(--tx3);font-family:var(--mono)}
+.ch:hover{background:var(--surf);color:var(--tx)}
+.ch.on{background:var(--surf2);color:var(--tx);box-shadow:inset 2px 0 0 var(--acc)}
+.ch .spk{margin-left:auto;display:flex;gap:2px;align-items:flex-end;height:11px}
+.ch .spk i{width:2px;background:var(--acc);border-radius:1px;display:block}
+.me{margin-top:auto;display:flex;align-items:center;gap:9px;padding:9px;border-radius:8px;
+  background:var(--surf);border:1px solid var(--line)}
+.me-tx{min-width:0}
+.me-nm{font-size:12.5px;font-weight:600}
+.me-sb{font-size:10.5px;color:var(--tx3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 头像 */
+.ava{border-radius:50%;display:grid;place-items:center;font-weight:600;color:#0b0e11;
+  background:linear-gradient(160deg,#7f8b98,#5b6570);flex:0 0 auto;user-select:none}
+.ava.sm{width:30px;height:30px;font-size:12px}
+.ava.big{width:72px;height:72px;font-size:26px;transition:box-shadow .12s}
+.ava.a1{background:linear-gradient(160deg,#8fd9c0,#4f9e83)}
+.ava.a2{background:linear-gradient(160deg,#a9b6c6,#6d7c8d)}
+.ava.a3{background:linear-gradient(160deg,#e0c48a,#a8873f)}
+
+/* ---- 主区 ---- */
+.main{padding:20px 22px;display:flex;flex-direction:column;gap:16px;overflow:hidden;min-width:0}
+.ch-head{display:flex;align-items:baseline;gap:12px}
+.ch-head h1{font-size:19px;font-weight:600;letter-spacing:.01em}
+.ch-head .meta{display:flex;gap:7px;margin-left:4px}
+
+.tiles{flex:1;display:grid;grid-template-columns:repeat(4,1fr);gap:12px;
+  grid-auto-rows:minmax(0,252px);align-content:center}
+.tile{position:relative;height:100%;border-radius:10px;border:1px solid var(--line);background:var(--surf);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:14px}
+.tile.self{background:linear-gradient(180deg,#161c22,#141920)}
+.tile.speaking{border-color:var(--acc-dim);background:linear-gradient(180deg,rgba(95,227,161,.09),rgba(95,227,161,.02))}
+.tile.speaking .ava{box-shadow:0 0 0 2px var(--acc),0 0 26px rgba(95,227,161,.28)}
+.tile.idle .ava{opacity:.92}
+.tile.muted{opacity:.72}
+.t-nm{font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:6px}
+.t-sub{font-size:11px;color:var(--tx3);height:14px}
+.badge{font-size:10px;padding:1px 6px;border-radius:4px;background:var(--surf3);color:var(--tx2);font-weight:500}
+.badge.mute{background:var(--danger-bg);color:var(--danger)}
+.badge.you{background:var(--acc-bg);color:var(--acc)}
+.seat{border:1px dashed var(--line);border-radius:10px;display:grid;place-items:center;
+  color:var(--tx3);font-size:11px;opacity:.45}
+.bar{width:104px;height:3px;border-radius:2px;background:var(--surf3);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--acc);border-radius:2px}
+.t-vol{display:flex;align-items:center;gap:7px;width:100%;justify-content:center;margin-top:2px}
+.t-vol input[type=range]{width:86px}
+.t-vol .v{font-size:10.5px;color:var(--tx3);width:26px;text-align:right}
+.mini{font:inherit;font-size:10.5px;color:var(--tx2);background:var(--surf2);border:1px solid var(--line);
+  border-radius:5px;padding:2px 7px;cursor:pointer}
+.mini:hover{color:var(--tx);border-color:var(--line2)}
+
+input[type=range]{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;background:var(--surf3);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;
+  background:var(--tx2);border:0;cursor:pointer}
+input[type=range]::-webkit-slider-thumb:hover{background:var(--tx)}
+
+/* ---- 底栏 ---- */
+.bottom{grid-column:2/-1;border-top:1px solid var(--line);background:#0f1318;
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:20px;padding:0 22px}
+.mic{display:flex;flex-direction:column;gap:6px;min-width:0}
+.mic-h{display:flex;align-items:baseline;gap:8px;font-size:11.5px;color:var(--tx2)}
+.mic-h .lv{font-size:10.5px;color:var(--tx3)}
+.seg{height:6px;border-radius:3px;background:var(--surf3);position:relative;overflow:hidden;max-width:240px}
+.seg i{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,var(--acc),#9ff0c6);border-radius:3px}
+.seg::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 9px,#0f1318 9px 11px)}
+.mic-dev{font-size:10.5px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.ptt-wrap{display:flex;flex-direction:column;align-items:center;gap:7px}
+.ptt{font:inherit;font-size:14px;font-weight:600;letter-spacing:.02em;height:46px;padding:0 30px;border-radius:999px;
+  display:inline-flex;align-items:center;gap:11px;cursor:pointer;
+  color:var(--tx);background:var(--surf2);border:1px solid var(--line2)}
+.ptt kbd{font:inherit;font-size:10.5px;font-weight:500;color:var(--tx3);background:#0b0e11;
+  border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:2px 6px}
+.ptt.on{background:linear-gradient(180deg,#5fe3a1,#3fbd83);color:#07130d;border-color:#7defb6;
+  box-shadow:0 0 0 3px rgba(95,227,161,.14),0 8px 24px rgba(95,227,161,.18)}
+.ptt.on kbd{background:rgba(0,0,0,.16);color:#0b1f16;border-color:rgba(0,0,0,.2)}
+.ptt.off{opacity:.45;cursor:not-allowed}
+.ptt-hint{font-size:10.5px;color:var(--tx3)}
+.ptt-hint.warn{color:var(--warn)}
+
+.actions{display:flex;justify-content:flex-end;gap:8px}
+.act{font:inherit;font-size:12px;height:32px;padding:0 13px;border-radius:7px;cursor:pointer;
+  color:var(--tx2);background:var(--surf2);border:1px solid var(--line)}
+.act:hover{color:var(--tx);border-color:var(--line2)}
+.act.on{color:var(--danger);background:var(--danger-bg);border-color:#5a2f31}
+
+/* ---- 网络面板 ---- */
+.panel{border-left:1px solid var(--line);background:#0f1318;display:flex;flex-direction:column;overflow:hidden}
+.panel.rail{align-items:center;padding:12px 0;gap:10px;cursor:pointer}
+.panel.rail .r-tx{writing-mode:vertical-rl;font-size:10.5px;letter-spacing:.16em;color:var(--tx3);text-transform:uppercase}
+.panel.rail .r-nm{font-size:10.5px;color:var(--acc);font-family:var(--mono);writing-mode:vertical-rl;letter-spacing:.04em}
+.panel .p-head{display:flex;align-items:center;gap:8px;padding:14px 14px 10px;font-size:12.5px;font-weight:600}
+.p-head .tag{font-size:9.5px;font-weight:500;letter-spacing:.06em;color:var(--tx3);border:1px solid var(--line);
+  border-radius:4px;padding:1px 5px}
+.p-body{padding:0 14px 14px;display:flex;flex-direction:column;gap:11px;overflow:hidden}
+.p-sum{display:flex;align-items:baseline;gap:6px}
+.p-sum b{font-size:26px;font-weight:600;font-family:var(--mono);letter-spacing:-.01em}
+.p-sum span{font-size:11px;color:var(--tx3)}
+.stack{display:flex;height:7px;border-radius:4px;overflow:hidden;background:var(--surf3)}
+.stack i{display:block;height:100%}
+.rows{display:flex;flex-direction:column;gap:6px}
+.row{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--tx2)}
+.row .k{color:var(--tx3)}
+.row .v{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--tx)}
+.row .v.dim{color:var(--tx3)}
+.row .sw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}
+.p-sec{font-size:10px;letter-spacing:.14em;color:var(--tx3);text-transform:uppercase;
+  border-top:1px solid var(--line);padding-top:11px}
+.note{font-size:10.5px;line-height:1.55;color:var(--tx3);background:var(--surf);border:1px solid var(--line);
+  border-radius:7px;padding:9px 10px}
+.note b{color:var(--tx2);font-weight:600}
+.gauge{height:6px;border-radius:3px;background:var(--surf3);position:relative;overflow:hidden}
+.gauge .band{position:absolute;top:0;bottom:0;background:rgba(95,227,161,.16);border-left:1px solid var(--acc-dim);border-right:1px solid var(--acc-dim)}
+.gauge .now{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--acc)}
+.btns{display:flex;gap:7px}
+.btn{font:inherit;font-size:11px;height:28px;padding:0 10px;border-radius:6px;cursor:pointer;
+  color:var(--tx2);background:var(--surf2);border:1px solid var(--line)}
+.btn:hover{color:var(--tx);border-color:var(--line2)}
+
+/* ---- 连接页 ---- */
+.connect{width:1440px;height:900px;display:grid;grid-template-columns:1fr 1fr;border-radius:var(--r);
+  overflow:hidden;border:1px solid var(--line);background:var(--win);box-shadow:0 24px 80px rgba(0,0,0,.6)}
+.c-left{position:relative;padding:56px 60px;display:flex;flex-direction:column;justify-content:center;gap:22px;
+  background:
+    radial-gradient(85% 62% at -6% 104%,rgba(95,227,161,.13),transparent 60%),
+    radial-gradient(55% 40% at 88% -8%,rgba(95,227,161,.05),transparent 72%),
+    #0d1116;border-right:1px solid var(--line)}
+.c-left .big{font-size:40px;font-weight:600;letter-spacing:.06em}
+.c-left .sub{font-size:13px;color:var(--tx2);letter-spacing:.06em}
+.c-left .pitch{font-size:15px;color:var(--tx2);line-height:1.7;margin-top:2px}
+.c-left .hr{width:64px;height:1px;background:var(--line2);margin:2px 0}
+.c-left .ver{position:absolute;left:60px;bottom:30px;font-size:10.5px;color:var(--tx3);letter-spacing:.06em}
+.c-left .facts{display:flex;flex-direction:column;gap:9px;margin-top:8px;font-size:11.5px;color:var(--tx3)}
+.c-left .facts div{display:flex;gap:9px;align-items:center}
+.c-left .facts i{width:3px;height:3px;border-radius:50%;background:var(--acc-dim)}
+.c-right{padding:56px 64px;display:flex;flex-direction:column;justify-content:center;gap:18px}
+.c-right h2{font-size:18px;font-weight:600}
+label.f{display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--tx3);letter-spacing:.04em}
+.inp{height:40px;border-radius:8px;border:1px solid var(--line2);background:#0c1015;display:flex;align-items:center;
+  padding:0 12px;font-family:var(--mono);font-size:13px;color:var(--tx)}
+.seg-ctl{display:flex;background:var(--surf);border:1px solid var(--line);border-radius:8px;padding:3px;gap:3px}
+.seg-ctl span{flex:1;text-align:center;font-size:12px;padding:7px 0;border-radius:6px;color:var(--tx2)}
+.seg-ctl span.on{background:var(--surf3);color:var(--tx);box-shadow:0 1px 0 rgba(255,255,255,.03)}
+.cert{border:1px solid var(--line);border-radius:8px;background:var(--surf);padding:11px 12px;display:flex;
+  flex-direction:column;gap:8px}
+.cert .h{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--tx2)}
+.fp{font-family:var(--mono);font-size:11px;color:var(--tx3);letter-spacing:.02em;line-height:1.5;word-break:break-all}
+.cert .acts{display:flex;gap:7px;margin-top:2px}
+.btn-primary{font:inherit;font-size:13px;font-weight:600;height:40px;border-radius:8px;cursor:pointer;
+  color:#07130d;background:linear-gradient(180deg,#5fe3a1,#3fbd83);border:1px solid #7defb6}
+.recent{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+.recent .it{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:7px;font-size:12px;color:var(--tx2)}
+.recent .it:hover{background:var(--surf)}
+.recent .it .ad{font-family:var(--mono);font-size:11px;color:var(--tx3)}
+.recent .it .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--tx3)}
+.tiny{font-size:10.5px;color:var(--tx3);line-height:1.6}
+
+/* ---- 设置页 ---- */
+.settings{width:1440px;height:900px;display:grid;grid-template-rows:48px 1fr;border-radius:var(--r);overflow:hidden;
+  border:1px solid var(--line);background:var(--win);box-shadow:0 24px 80px rgba(0,0,0,.6)}
+.set-body{display:grid;grid-template-columns:212px 1fr;overflow:hidden}
+.set-nav{border-right:1px solid var(--line);background:#0f1318;padding:14px 10px;display:flex;flex-direction:column;gap:2px}
+.set-nav .it{display:flex;align-items:center;gap:9px;height:34px;padding:0 11px;border-radius:7px;font-size:12.5px;color:var(--tx2)}
+.set-nav .it.on{background:var(--surf2);color:var(--tx);box-shadow:inset 2px 0 0 var(--acc)}
+.set-nav .it:hover{background:var(--surf);color:var(--tx)}
+.set-main{padding:24px 32px;display:flex;flex-direction:column;gap:18px;overflow:hidden}
+.set-main h2{font-size:16px;font-weight:600}
+.group{display:flex;flex-direction:column;gap:10px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.group:last-child{border-bottom:0}
+.g-h{font-size:10.5px;letter-spacing:.14em;color:var(--tx3);text-transform:uppercase}
+.field{display:grid;grid-template-columns:132px 1fr;align-items:center;gap:14px}
+.field .lb{font-size:12px;color:var(--tx2)}
+.sel{height:36px;border-radius:8px;border:1px solid var(--line2);background:#0c1015;display:flex;align-items:center;
+  gap:9px;padding:0 12px;font-size:12px}
+.sel .ok{font-size:10.5px;color:var(--acc)}
+.sel .chev{margin-left:auto;color:var(--tx3);font-size:10px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.card{border:1px solid var(--line);border-radius:9px;background:var(--surf);padding:12px;display:flex;flex-direction:column;gap:7px}
+.card.on{border-color:var(--acc-dim);background:linear-gradient(180deg,rgba(95,227,161,.09),rgba(95,227,161,.02));
+  box-shadow:0 0 0 1px var(--acc-dim) inset}
+.card .t{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px}
+.card .d{font-size:10.5px;color:var(--tx3);line-height:1.5}
+.card .m{display:flex;flex-direction:column;gap:3px;margin-top:auto;font-family:var(--mono);font-size:10.5px;color:var(--tx2)}
+.card .m span{display:flex;justify-content:space-between}
+.card .m em{color:var(--tx3);font-style:normal}
+.banner{display:flex;align-items:flex-start;gap:10px;border-radius:8px;padding:11px 12px;font-size:11.5px;line-height:1.55;
+  background:var(--warn-bg);border:1px solid #5a462a;color:#f0d4a2}
+.banner b{color:var(--warn)}
+
+/* ---- 重连横幅 ---- */
+.recon{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:0 18px;font-size:12px;
+  background:linear-gradient(90deg,rgba(232,180,92,.16),rgba(232,180,92,.05));border-bottom:1px solid #5a462a;color:#f0d4a2}
+.recon .t{font-weight:600;color:var(--warn)}
+.recon .sub{color:#c9b48c}
+.recon .acts{margin-left:auto;display:flex;gap:7px}
+.recon .btn{background:rgba(0,0,0,.22);border-color:#6b532f;color:#f0d4a2}
+.stale{opacity:.45;filter:saturate(.5)}
+
+/* solo 模式（截图用） */
+body.solo{padding:0;background:#0b0e11}
+body.solo .switcher,body.solo .cap{display:none}
+body.solo .stage{gap:0}
+body.solo .frame{zoom:1}
+</style>
+</head>
+<body>
+
+<nav class="switcher">
+  <button data-n="1">1 连接</button>
+  <button data-n="2">2 频道内 · 听</button>
+  <button data-n="3">3 频道内 · 说 + 网络面板</button>
+  <button data-n="4">4 设置</button>
+  <button data-n="5">5 重连</button>
+</nav>
+
+<div class="stage">
+
+<!-- ============ 1. 连接 ============ -->
+<section class="frame" data-n="1">
+  <div class="connect">
+    <div class="c-left">
+
+      <svg width="46" height="46" viewBox="0 0 46 46" aria-hidden="true">
+        <rect x="5"  y="19" width="5" height="8"  rx="2.5" fill="#2b6b4d"/>
+        <rect x="14" y="12" width="5" height="22" rx="2.5" fill="#5fe3a1"/>
+        <rect x="23" y="16" width="5" height="14" rx="2.5" fill="#5fe3a1"/>
+        <rect x="32" y="21" width="5" height="4"  rx="2"   fill="#2b6b4d"/>
+      </svg>
+      <div>
+        <div class="big">静队</div>
+        <div class="sub">HUSHSQUAD · 小队语音</div>
+      </div>
+      <div class="pitch">只传你的声音，<br>不传你的房间。</div>
+      <div class="hr"></div>
+      <div class="facts">
+        <div><i></i>10 ms 帧 · 软件预算 22.5 ms（本机实测）</div>
+        <div><i></i>32 kbps 单声道 · ChaCha20-Poly1305</div>
+        <div><i></i>最多 8 人 · 按人音量与独听</div>
+      </div>
+      <div class="ver">v0.1.0 · Windows</div>
+    </div>
+
+    <div class="c-right">
+      <h2>连接到服务器</h2>
+
+      <label class="f">服务器地址
+        <div class="inp">hushsquad.lan:8443</div>
+      </label>
+
+      <label class="f">身份
+        <div class="seg-ctl"><span class="on">匿名（这台设备）</span><span>账号</span></div>
+      </label>
+
+      <div class="cert">
+        <div class="h"><span class="dot ok"></span>首次连接这台服务器 · 记住它的指纹</div>
+        <div class="fp">SHA-256 3A:9F:2C:71:8D:04:B6:E1:52:7C:9A:33:F0:6E:18:BD:<br>7B:22:C5:40:9D:31:8E:66:AF:10:47:58:D2:03:9C:4E</div>
+        <div class="acts">
+          <button class="btn">信任并记住</button>
+          <button class="btn">不信任</button>
+        </div>
+      </div>
+      <div class="tiny">指纹变了会直接拒绝连接，除非你在这里点「重新信任」。证书不写进系统钥匙串。</div>
+
+      <button class="btn-primary">连接</button>
+
+      <div class="recent">
+        <div class="it"><span class="dot ok"></span>家里 · 局域网<span class="ad">hushsquad.lan:8443</span><span class="ms">14 ms</span></div>
+        <div class="it"><span class="dot"></span>公司<span class="ad">hushsquad.internal:8443</span><span class="ms">—</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2. 频道内 · 听 ============ -->
+<section class="frame" data-n="2">
+  <div class="win">
+    <header class="top">
+      <div class="brand">
+        <svg width="18" height="18" viewBox="0 0 46 46" aria-hidden="true">
+          <rect x="5" y="19" width="5" height="8" rx="2.5" fill="#2b6b4d"/>
+          <rect x="14" y="12" width="5" height="22" rx="2.5" fill="#5fe3a1"/>
+          <rect x="23" y="16" width="5" height="14" rx="2.5" fill="#5fe3a1"/>
+          <rect x="32" y="21" width="5" height="4" rx="2" fill="#2b6b4d"/>
+        </svg>
+        <span class="nm">静队</span><span class="en">HushSquad</span>
+      </div>
+      <div class="top-mid">
+        <span class="chip"><span class="dot ok"></span>已连接</span>
+        <span class="chip mono">hushsquad.lan:8443</span>
+      </div>
+      <div class="top-right">
+        <span class="chip mono">RTT 0.6 ms</span>
+        <button class="icon-btn" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <aside class="side">
+      <div>
+        <div class="side-h">服务器</div>
+        <div class="server">
+          <div class="s-nm">家里 · 局域网</div>
+          <div class="s-ad mono">hushsquad.lan:8443</div>
+          <div class="s-mt"><span class="dot ok"></span>已连接 · <span class="mono">TLS 1.3</span></div>
+        </div>
+      </div>
+      <div class="side-sec grow">
+        <div class="side-h">频道</div>
+        <div class="ch on"><span class="hash">#</span>大厅
+          <span class="spk"><i style="height:4px"></i><i style="height:9px"></i><i style="height:6px"></i></span>
+          <span class="n">3/8</span></div>
+        <div class="ch"><span class="hash">#</span>团战<span class="n">0</span></div>
+        <div class="ch"><span class="hash">#</span>挂机<span class="n">1</span></div>
+      </div>
+      <div class="me">
+        <div class="ava sm a1">木</div>
+        <div class="me-tx">
+          <div class="me-nm">小木</div>
+          <div class="me-sb">匿名 · 这台设备</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="ch-head">
+        <h1>大厅</h1>
+        <div class="meta">
+          <span class="chip">3 / 8 人</span>
+          <span class="chip">高通 + RNNoise</span>
+          <span class="chip mono">10 ms</span>
+        </div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile self">
+          <div class="ava big a1">木</div>
+          <div class="t-nm">小木 <span class="badge you">你</span></div>
+          <div class="t-sub mono">上行 32 kbps</div>
+          <div class="bar"><i style="width:0%"></i></div>
+        </div>
+
+        <div class="tile speaking">
+          <div class="ava big a3">K</div>
+          <div class="t-nm">老K</div>
+          <div class="t-sub mono">−21 dBFS</div>
+          <div class="bar"><i style="width:64%"></i></div>
+        </div>
+
+        <div class="tile muted">
+          <div class="ava big a2">岚</div>
+          <div class="t-nm">阿岚 <span class="badge mute">静音</span></div>
+          <div class="t-vol">
+            <input type="range" value="80" aria-label="阿岚音量">
+            <span class="v mono">80</span>
+            <button class="mini">独听</button>
+          </div>
+        </div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+      </div>
+    </main>
+
+    <aside class="panel rail" title="展开网络面板">
+      <span class="r-tx">网络</span>
+      <span class="r-nm">14 ms</span>
+      <span style="color:var(--tx3);font-size:10px">‹</span>
+    </aside>
+
+    <footer class="bottom">
+      <div class="mic">
+        <div class="mic-h">麦克风 <span class="lv mono">−18 dBFS</span></div>
+        <div class="seg"><i style="width:46%"></i></div>
+        <div class="mic-dev">Microphone (USB Condenser Microphone) · 48 kHz</div>
+      </div>
+      <div class="ptt-wrap">
+        <button class="ptt">按住说话 <kbd>Space</kbd></button>
+        <div class="ptt-hint">静音优先于任何按键 · 可改成语音激活</div>
+      </div>
+      <div class="actions">
+        <button class="act">静音</button>
+        <button class="act">闭听</button>
+      </div>
+    </footer>
+  </div>
+</section>
+
+<!-- ============ 3. 频道内 · 说 + 网络面板 ============ -->
+<section class="frame" data-n="3">
+  <div class="win wide">
+    <header class="top">
+      <div class="brand">
+        <svg width="18" height="18" viewBox="0 0 46 46" aria-hidden="true">
+          <rect x="5" y="19" width="5" height="8" rx="2.5" fill="#2b6b4d"/>
+          <rect x="14" y="12" width="5" height="22" rx="2.5" fill="#5fe3a1"/>
+          <rect x="23" y="16" width="5" height="14" rx="2.5" fill="#5fe3a1"/>
+          <rect x="32" y="21" width="5" height="4" rx="2" fill="#2b6b4d"/>
+        </svg>
+        <span class="nm">静队</span><span class="en">HushSquad</span>
+      </div>
+      <div class="top-mid">
+        <span class="chip live"><span class="dot ok"></span>正在发送</span>
+        <span class="chip mono">hushsquad.lan:8443</span>
+      </div>
+      <div class="top-right">
+        <span class="chip mono">RTT 0.6 ms</span>
+        <button class="icon-btn" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <aside class="side">
+      <div>
+        <div class="side-h">服务器</div>
+        <div class="server">
+          <div class="s-nm">家里 · 局域网</div>
+          <div class="s-ad mono">hushsquad.lan:8443</div>
+          <div class="s-mt"><span class="dot ok"></span>已连接 · <span class="mono">TLS 1.3</span></div>
+        </div>
+      </div>
+      <div class="side-sec grow">
+        <div class="side-h">频道</div>
+        <div class="ch on"><span class="hash">#</span>大厅
+          <span class="spk"><i style="height:7px"></i><i style="height:11px"></i><i style="height:9px"></i></span>
+          <span class="n">3/8</span></div>
+        <div class="ch"><span class="hash">#</span>团战<span class="n">0</span></div>
+        <div class="ch"><span class="hash">#</span>挂机<span class="n">1</span></div>
+      </div>
+      <div class="me">
+        <div class="ava sm a1">木</div>
+        <div class="me-tx">
+          <div class="me-nm">小木</div>
+          <div class="me-sb">匿名 · 这台设备</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="ch-head">
+        <h1>大厅</h1>
+        <div class="meta">
+          <span class="chip">3 / 8 人</span>
+          <span class="chip">高通 + RNNoise</span>
+          <span class="chip mono">10 ms</span>
+        </div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile self speaking">
+          <div class="ava big a1">木</div>
+          <div class="t-nm">小木 <span class="badge you">你</span></div>
+          <div class="t-sub mono">−14 dBFS · 发送中</div>
+          <div class="bar"><i style="width:72%"></i></div>
+        </div>
+
+        <div class="tile idle">
+          <div class="ava big a3">K</div>
+          <div class="t-nm">老K</div>
+          <div class="t-sub">在听</div>
+          <div class="bar"><i style="width:0%"></i></div>
+        </div>
+
+        <div class="tile muted">
+          <div class="ava big a2">岚</div>
+          <div class="t-nm">阿岚 <span class="badge mute">静音</span></div>
+          <div class="t-vol">
+            <input type="range" value="80" aria-label="阿岚音量">
+            <span class="v mono">80</span>
+            <button class="mini">独听</button>
+          </div>
+        </div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+      </div>
+    </main>
+
+    <aside class="panel">
+      <div class="p-head">这条链路 <span class="tag">承诺口径</span></div>
+      <div class="p-body">
+        <div class="p-sum"><b>22.5</b><span>ms 软件合计</span></div>
+
+        <div class="stack" title="按比例：抖动缓冲与播放缓冲占绝大部分">
+          <i style="width:1%;background:#4a5b6b"></i>
+          <i style="width:1%;background:#5c7f6f"></i>
+          <i style="width:1%;background:#7b93a8"></i>
+          <i style="width:2%;background:#8aa4bb"></i>
+          <i style="width:62%;background:#5fe3a1"></i>
+          <i style="width:33%;background:#3fbd83"></i>
+        </div>
+
+        <div class="rows">
+          <div class="row"><span class="sw" style="background:#4a5b6b"></span><span class="k">采集缓冲</span><span class="v">0.0</span></div>
+          <div class="row"><span class="sw" style="background:#5c7f6f"></span><span class="k">前处理</span><span class="v">0.08</span></div>
+          <div class="row"><span class="sw" style="background:#7b93a8"></span><span class="k">编码</span><span class="v">0.14</span></div>
+          <div class="row"><span class="sw" style="background:#8aa4bb"></span><span class="k">网络单程</span><span class="v">0.3</span></div>
+          <div class="row"><span class="sw" style="background:#5fe3a1"></span><span class="k">抖动缓冲</span><span class="v">14.0</span></div>
+          <div class="row"><span class="sw" style="background:#3fbd83"></span><span class="k">播放缓冲</span><span class="v">8.0</span></div>
+        </div>
+
+        <div class="note"><b>设备段另计。</b>本机声学环回实测 <span class="mono">175.3 ms</span>，其中约 <span class="mono">139 ms</span> 是这只麦克风本身。它不是我们的处理链，所以不进上面的承诺值（ADR-0010）。</div>
+
+        <div class="p-sec">实时</div>
+        <div class="rows">
+          <div class="row"><span class="k">抖动缓冲</span><span class="v">14 ms</span></div>
+          <div class="gauge"><span class="band" style="left:37%;right:47%"></span><span class="now" style="left:44%"></span></div>
+          <div class="row"><span class="k">预算 15–20 · 上限 60</span><span class="v dim">绿区 = 预算</span></div>
+          <div class="row"><span class="k">丢包</span><span class="v">0.0 %</span></div>
+          <div class="row"><span class="k">RTT p50 / p95</span><span class="v">0.6 / 0.8</span></div>
+          <div class="row"><span class="k">上行码率</span><span class="v">32 kbps</span></div>
+          <div class="row"><span class="k">欠载 / 环满丢</span><span class="v">0 / 0</span></div>
+        </div>
+
+        <div class="p-sec">自检</div>
+        <div class="rows">
+          <div class="row"><span class="k">数字回环</span><span class="v">34.3 ms</span></div>
+          <div class="row"><span class="k">声学回环</span><span class="v">175.3 ms</span></div>
+        </div>
+        <div class="btns"><button class="btn">重新测量（会出声）</button></div>
+      </div>
+    </aside>
+
+    <footer class="bottom">
+      <div class="mic">
+        <div class="mic-h">麦克风 <span class="lv mono">−14 dBFS</span></div>
+        <div class="seg"><i style="width:72%"></i></div>
+        <div class="mic-dev">Microphone (USB Condenser Microphone) · 48 kHz</div>
+      </div>
+      <div class="ptt-wrap">
+        <button class="ptt on">正在发送 <kbd>Space</kbd></button>
+        <div class="ptt-hint">松手即停 · 已发送 1.4 s</div>
+      </div>
+      <div class="actions">
+        <button class="act">静音</button>
+        <button class="act">闭听</button>
+      </div>
+    </footer>
+  </div>
+</section>
+
+<!-- ============ 4. 设置 ============ -->
+<section class="frame" data-n="4">
+  <div class="settings">
+    <header class="top">
+      <div class="brand">
+        <svg width="18" height="18" viewBox="0 0 46 46" aria-hidden="true">
+          <rect x="5" y="19" width="5" height="8" rx="2.5" fill="#2b6b4d"/>
+          <rect x="14" y="12" width="5" height="22" rx="2.5" fill="#5fe3a1"/>
+          <rect x="23" y="16" width="5" height="14" rx="2.5" fill="#5fe3a1"/>
+          <rect x="32" y="21" width="5" height="4" rx="2" fill="#2b6b4d"/>
+        </svg>
+        <span class="nm">静队</span><span class="en">设置</span>
+      </div>
+      <div class="top-right"><span class="chip mono">0.1.0</span></div>
+    </header>
+
+    <div class="set-body">
+      <nav class="set-nav">
+        <div class="it on">音频</div>
+        <div class="it">网络</div>
+        <div class="it">关于</div>
+      </nav>
+
+      <div class="set-main">
+        <h2>音频</h2>
+
+        <div class="group">
+          <div class="g-h">设备</div>
+          <div class="field">
+            <span class="lb">麦克风</span>
+            <div class="sel">Microphone (USB Condenser Microphone) <span class="ok">48 kHz ✓</span><span class="chev">▾</span></div>
+          </div>
+          <div class="field">
+            <span class="lb">扬声器</span>
+            <div class="sel">扬声器 (Realtek(R) Audio) <span class="ok">48 kHz ✓</span><span class="chev">▾</span></div>
+          </div>
+          <div class="field">
+            <span class="lb"></span>
+            <div class="tiny">这台机器的声学环回实测 <span class="mono">175 ms</span>，其中约 <span class="mono">139 ms</span> 来自麦克风本身，与我们无关。非 48 kHz 设备会被拒绝，不做静默重采样。</div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="g-h">处理档（上行）</div>
+          <div class="cards">
+            <div class="card">
+              <div class="t">直通</div>
+              <div class="d">只做编码。用来对比、排查问题。</div>
+              <div class="m"><span><em>延迟</em>0 ms</span><span><em>CPU</em>0.00 ms/帧</span></div>
+            </div>
+            <div class="card">
+              <div class="t">高通 + AGC2</div>
+              <div class="d">去掉低频隆隆声，把电平拉平。无降噪。</div>
+              <div class="m"><span><em>延迟</em>0 ms</span><span><em>CPU</em>0.03 ms/帧</span></div>
+            </div>
+            <div class="card on">
+              <div class="t">+ RNNoise <span class="badge you">默认</span></div>
+              <div class="d">压键盘、风扇、椅擦。10 ms 算法延迟。</div>
+              <div class="m"><span><em>延迟</em>10 ms</span><span><em>CPU</em>0.08 ms/帧</span></div>
+            </div>
+            <div class="card">
+              <div class="t">+ DFN3</div>
+              <div class="d">质量档。桌面专属，跑在工作线程上。</div>
+              <div class="m"><span><em>延迟</em>30 + 20 ms</span><span><em>CPU</em>0.42 ms/帧</span></div>
+            </div>
+          </div>
+          <div class="tiny">切换做 20 ms 交叉淡化，不爆音。DFN3 多出的 20 ms 是工作线程队列（常数），不是抖动。</div>
+        </div>
+
+        <div class="group">
+          <div class="g-h">说话方式</div>
+          <div class="field">
+            <span class="lb">方式</span>
+            <div class="seg-ctl" style="max-width:420px"><span class="on">按住说话</span><span>语音激活</span><span>常开</span></div>
+          </div>
+          <div class="field">
+            <span class="lb">热键</span>
+            <div class="sel" style="max-width:420px">Space <span class="chev" style="margin-left:auto">可改</span></div>
+          </div>
+          <div class="field">
+            <span class="lb">灵敏度</span>
+            <div style="display:flex;align-items:center;gap:12px">
+              <input type="range" value="62" style="width:280px">
+              <span class="mono" style="font-size:11px;color:var(--tx3)">门限 −38 dBFS</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="g-h">自检</div>
+          <div class="field">
+            <span class="lb">麦克风测试</span>
+            <div style="display:flex;align-items:center;gap:12px">
+              <button class="btn">录 5 秒并回放</button>
+              <span class="tiny">确认设备与音量。会从扬声器出声。</span>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lb">延迟自检</span>
+            <div style="display:flex;align-items:center;gap:14px">
+              <span class="mono" style="font-size:11.5px;color:var(--tx2)">数字回环 34.3 ms</span>
+              <span class="mono" style="font-size:11.5px;color:var(--tx2)">声学回环 175.3 ms</span>
+              <button class="btn">重新测量</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="banner">
+          <span style="font-size:14px;line-height:1.2">⚠</span>
+          <div><b>检测到蓝牙耳麦。</b>回传麦克风会切到 SCO，延迟与音质都会下降。要低延迟请用有线或 USB 耳机——蓝牙只保证「能用」。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5. 重连 ============ -->
+<section class="frame" data-n="5">
+  <div class="win" style="grid-template-rows:48px 40px 1fr 92px">
+    <header class="top">
+      <div class="brand">
+        <svg width="18" height="18" viewBox="0 0 46 46" aria-hidden="true">
+          <rect x="5" y="19" width="5" height="8" rx="2.5" fill="#2b6b4d"/>
+          <rect x="14" y="12" width="5" height="22" rx="2.5" fill="#5fe3a1"/>
+          <rect x="23" y="16" width="5" height="14" rx="2.5" fill="#5fe3a1"/>
+          <rect x="32" y="21" width="5" height="4" rx="2" fill="#2b6b4d"/>
+        </svg>
+        <span class="nm">静队</span><span class="en">HushSquad</span>
+      </div>
+      <div class="top-mid">
+        <span class="chip warn"><span class="dot" style="background:var(--warn)"></span>重连中</span>
+        <span class="chip mono">hushsquad.lan:8443</span>
+      </div>
+      <div class="top-right">
+        <span class="chip mono dim" style="color:var(--tx3)">RTT —</span>
+        <button class="icon-btn" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <div class="recon">
+      <span class="t">与服务器的连接中断</span>
+      <span class="sub">正在重连（第 2 次，已 1.7 s）· 你的声音现在传不出去</span>
+      <div class="acts">
+        <button class="btn">立即重试</button>
+        <button class="btn">断开</button>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div>
+        <div class="side-h">服务器</div>
+        <div class="server stale">
+          <div class="s-nm">家里 · 局域网</div>
+          <div class="s-ad mono">hushsquad.lan:8443</div>
+          <div class="s-mt"><span class="dot" style="background:var(--warn)"></span>重连中 · <span class="mono">TLS —</span></div>
+        </div>
+      </div>
+      <div class="side-sec grow stale">
+        <div class="side-h">频道</div>
+        <div class="ch on"><span class="hash">#</span>大厅<span class="n">3/8</span></div>
+        <div class="ch"><span class="hash">#</span>团战<span class="n">—</span></div>
+        <div class="ch"><span class="hash">#</span>挂机<span class="n">—</span></div>
+      </div>
+      <div class="me">
+        <div class="ava sm a1">木</div>
+        <div class="me-tx">
+          <div class="me-nm">小木</div>
+          <div class="me-sb">匿名 · 这台设备</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="ch-head">
+        <h1>大厅</h1>
+        <div class="meta">
+          <span class="chip">3 / 8 人</span>
+          <span class="chip">高通 + RNNoise</span>
+          <span class="chip mono">10 ms</span>
+        </div>
+      </div>
+
+      <div class="tiles stale">
+        <div class="tile self">
+          <div class="ava big a1">木</div>
+          <div class="t-nm">小木 <span class="badge you">你</span></div>
+          <div class="t-sub">状态未知</div>
+          <div class="bar"><i style="width:0%"></i></div>
+        </div>
+        <div class="tile">
+          <div class="ava big a3">K</div>
+          <div class="t-nm">老K</div>
+          <div class="t-sub">状态未知</div>
+          <div class="bar"><i style="width:0%"></i></div>
+        </div>
+        <div class="tile">
+          <div class="ava big a2">岚</div>
+          <div class="t-nm">阿岚</div>
+          <div class="t-sub">状态未知</div>
+          <div class="bar"><i style="width:0%"></i></div>
+        </div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+        <div class="seat">空位</div>
+      </div>
+      <div class="note" style="max-width:520px">恢复后会自动回到「大厅」，不需要重新选频道。这段时间的语音不会补发。</div>
+    </main>
+
+    <aside class="panel rail stale">
+      <span class="r-tx">网络</span>
+      <span class="r-nm" style="color:var(--tx3)">—</span>
+      <span style="color:var(--tx3);font-size:10px">‹</span>
+    </aside>
+
+    <footer class="bottom">
+      <div class="mic">
+        <div class="mic-h">麦克风 <span class="lv mono">—</span></div>
+        <div class="seg"><i style="width:0%"></i></div>
+        <div class="mic-dev">Microphone (USB Condenser Microphone) · 48 kHz</div>
+      </div>
+      <div class="ptt-wrap">
+        <button class="ptt off">按住说话 <kbd>Space</kbd></button>
+        <div class="ptt-hint warn">重连中，暂不发送</div>
+      </div>
+      <div class="actions">
+        <button class="act">静音</button>
+        <button class="act">闭听</button>
+      </div>
+    </footer>
+  </div>
+</section>
+
+</div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const frames = [...document.querySelectorAll('.frame')];
+  const btns = [...document.querySelectorAll('.switcher button')];
+  const solo = params.has('only');
+  if (solo) document.body.classList.add('solo');
+
+  function show(n){
+    frames.forEach(f => f.classList.toggle('on', Number(f.dataset.n) === n));
+    btns.forEach(b => b.classList.toggle('on', Number(b.dataset.n) === n));
+  }
+  btns.forEach(b => b.onclick = () => show(Number(b.dataset.n)));
+
+  const caps = {
+    1:'1 · 连接：地址 + 匿名/账号 + 首次指纹（TOFU）',
+    2:'2 · 频道内（听）：别人在说话，网络面板收起',
+    3:'3 · 频道内（说）：PTT 按下 + 网络面板展开',
+    4:'4 · 设置：设备 / 处理档 / 说话方式',
+    5:'5 · 重连：横幅说明「你的声音传不出去」'
+  };
+  document.querySelectorAll('.frame').forEach(f => {
+    const c = document.createElement('div');
+    c.className = 'cap'; c.textContent = caps[f.dataset.n] || '';
+    f.after(c);
+  });
+
+  function fit(){
+    if (solo) return;
+    const k = Math.min(1, (innerWidth - 56) / 1440);
+    document.documentElement.style.setProperty('--k', k);
+  }
+  addEventListener('resize', fit); fit();
+  show(Number(params.get('s') || 1));
+</script>
+</body>
+</html>
