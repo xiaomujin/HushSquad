@@ -18,6 +18,13 @@ Write-Host "==> cargo clippy -D warnings" -ForegroundColor Cyan
 cargo clippy --workspace --all-targets -- -D warnings
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: clippy" -ForegroundColor Red; exit 1 }
 
+Write-Host "==> 生成合成素材（种子 42，20 s/条）" -ForegroundColor Cyan
+# 素材不入库（见 .gitignore：固定种子，重生成即可），而 crates/testkit/tests/baseline.rs
+# 要拿这 6 条素材去比 testdata/baseline.json，所以这一步必须排在 cargo test **之前**。
+# 本机通常早就有了素材，看不出这个顺序依赖——干净的克隆上少了它，基线测试直接红。
+cargo run -q -p testkit -- gen --out testdata/synthetic
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: gen 合成素材" -ForegroundColor Red; exit 1 }
+
 Write-Host "==> cargo test" -ForegroundColor Cyan
 cargo test --workspace
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: test" -ForegroundColor Red; exit 1 }

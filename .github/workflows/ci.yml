@@ -41,12 +41,21 @@ jobs:
       - name: clippy（-D warnings）
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # 合成素材不进仓库（.gitignore 里写了「固定种子，CI 里跑一次 gen 就够」），
+      # 但**顺序是硬要求**：`crates/testkit/tests/baseline.rs` 要拿这 6 条素材去比
+      # testdata/baseline.json。gen 排在 `cargo test` 之后的话，测试会因为
+      # 「打不开 testdata/synthetic/clean_48k_mono.wav」直接红（exit 101）——
+      # 本机看不出来，是因为素材早就躺在工作区里了。
+      # 时长必须用**默认的 20 s**：基线里的指标是按 20 s 素材算的，`--seconds 3`
+      # 生成出来的前 3 秒数值并不相同（扫频/归一化跟总时长有关，实测 11 项超差）。
+      - name: 生成合成素材（种子 42，20 s/条）
+        run: cargo run -p testkit -- gen --out testdata/synthetic
+
       - name: 测试
         run: cargo test --workspace
 
-      - name: 离线回放冒烟（合成素材 → 链路 → 热路径零分配门禁）
+      - name: 离线回放冒烟（素材 → 链路 → 热路径零分配门禁）
         run: |
-          cargo run -p testkit -- gen --out testdata/synthetic --seconds 3
           cargo run -p testkit -- run --in testdata/synthetic/clean_48k_mono.wav \
             --out out/proc.wav --chain opus --codec opus:10ms:32k --report out/report.json
 
