@@ -55,7 +55,8 @@ type WireEvent =
   | ({ kind: 'meters' } & Meters)
   | ({ kind: 'net' } & WireNet)
   | { kind: 'accounts'; accounts: Account[] }
-  | { kind: 'notice'; message: string };
+  | { kind: 'notice'; message: string }
+  | { kind: 'phase'; phase: Phase; error: string | null };
 
 /** 真后端。 */
 export class TauriBackend implements Backend {
@@ -89,6 +90,11 @@ export class TauriBackend implements Backend {
     await invoke('disconnect');
     this.#events = null;
     this.#handlers?.onPhase('disconnected');
+  }
+
+  /** 重连期间那颗「立即重试」：让监督线程别再等退避，现在就连。 */
+  async reconnect(): Promise<void> {
+    await invoke('reconnect');
   }
 
   async joinChannel(channelId: number): Promise<void> {
@@ -240,6 +246,10 @@ export class TauriBackend implements Backend {
         break;
       case 'notice':
         handlers.onNotice(event.message);
+        break;
+      case 'phase':
+        // 重连期间没有快照可推（没有会话），所以只有阶段。
+        handlers.onPhase(event.phase, event.error ?? undefined);
         break;
     }
   }

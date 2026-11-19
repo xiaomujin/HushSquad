@@ -16,6 +16,7 @@
 mod ipc;
 mod ptt;
 mod session;
+mod supervisor;
 
 use ipc::AppState;
 use tauri::Manager;
@@ -34,6 +35,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::connect,
             ipc::disconnect,
+            ipc::reconnect,
             ipc::join_channel,
             ipc::set_self,
             ipc::set_user,

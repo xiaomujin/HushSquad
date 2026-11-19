@@ -21,6 +21,11 @@
   // 后端事件 → 镜像。低频事件走这里；高频电平也在同一条流上（Tauri 侧是 Channel<T>）。
   backend.subscribe({
     onPhase(phase, error) {
+      // 重连期间新会话会从 authenticating 一路走到 in_channel。中间这几步不该把
+      // 「重连中」的横幅收掉——那会让界面闪一下，看起来像连上了又断了。
+      // 只有真的进了频道（或者彻底失败）才离开重连态。
+      const transient = phase === 'authenticating' || phase === 'connected' || phase === 'joining';
+      if (app.phase === 'reconnecting' && transient) return;
       app.phase = phase;
       app.error = error;
       // 断线后本机的静音/闭听不会保留（新会话从「开麦、不闭听」开始），

@@ -4,6 +4,7 @@
   import MemberArea from './MemberArea.svelte';
   import NetworkPanel from './NetworkPanel.svelte';
   import { initial } from '../lib/format';
+  import { backend } from '../lib/backend';
   import { roleOf } from '../lib/ipc';
   import { app } from '../lib/state.svelte';
 
@@ -52,8 +53,8 @@
       <span class="t">与服务器的连接中断</span>
       <span class="sub">正在重连 · 你的声音现在传不出去</span>
       <div class="acts">
-        <button class="btn">立即重试</button>
-        <button class="btn">断开</button>
+        <button class="btn" onclick={() => void backend.reconnect().catch(() => {})}>立即重试</button>
+        <button class="btn" onclick={() => void backend.disconnect().catch(() => {})}>断开</button>
       </div>
     </div>
   {/if}
@@ -65,7 +66,12 @@
         <div class="s-nm">家里 · 局域网</div>
         <div class="s-ad mono">{app.addr}</div>
         <div class="s-mt">
-          <span class="dot ok"></span>{joining ? '加入中' : '已连接'} · <span class="mono">TLS 1.3</span>
+          <!-- 重连时这里不能还写「已连接」：那和上面那条横幅自相矛盾。 -->
+          <span class="dot" class:ok={!reconnecting} class:warn={reconnecting}></span>{reconnecting
+            ? '重连中'
+            : joining
+              ? '加入中'
+              : '已连接'} · <span class="mono">TLS 1.3</span>
         </div>
       </div>
     </div>

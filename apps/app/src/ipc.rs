@@ -31,6 +31,7 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use crate::ptt::{self, KeyBinding};
 use crate::session::{Event, Session};
+use crate::supervisor;
 
 /// 全局状态：最多一条会话 + 上行设置。
 ///
@@ -44,6 +45,8 @@ pub struct AppState {
     ptt: Arc<Mutex<KeyBinding>>,
     /// 键现在注册着吗。与 `ptt` 分开：键可以改，注册状态是运行时事实。
     ptt_registered: Arc<AtomicBool>,
+    /// 重连监督线程用的共享标志（代次 / 断开 / 立即重试 / 压掉重连期间的错误）。
+    pub(crate) signals: Arc<supervisor::Signals>,
 }
 
 impl Default for AppState {
@@ -53,6 +56,7 @@ impl Default for AppState {
             voice: Arc::new(Mutex::new(VoiceMode::Vad)),
             ptt: Arc::new(Mutex::new(KeyBinding::default())),
             ptt_registered: Arc::default(),
+            signals: Arc::default(),
         }
     }
 }
@@ -112,6 +116,28 @@ impl AppState {
 
     pub(crate) fn set_ptt_registered(&self, registered: bool) {
         self.ptt_registered.store(registered, Ordering::Release);
+    }
+
+    /// 换掉当前会话（重连用）。旧的那个已经自己退出了。
+    pub(crate) fn replace_session(&self, session: Session) {
+        if let Ok(mut slot) = self.session.lock() {
+            *slot = Some(session);
+        }
+    }
+
+    /// 重连监督线程的代次。
+    pub(crate) fn generation(&self) -> u64 {
+        self.signals.generation()
+    }
+
+    /// 用户要断开。
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.signals.stopping()
+    }
+
+    /// 取走「立即重试」这一次请求。
+    pub(crate) fn take_retry_now(&self) -> bool {
+        self.signals.take_retry_now()
     }
 }
 
@@ -226,9 +252,17 @@ pub async fn connect(
     let cfg = request.into_config()?;
     let mode = cfg.voice;
     let notice = events.clone();
-    let for_session = app.clone();
+    // 监督线程要用同一份配置重起会话（服务器地址、证书、身份、音频设备都在里面）。
+    let cfg_for_watch = cfg.clone();
     let for_blocking = inner.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    let for_blocking_app = app.clone();
+    // 新会话一开就把代次加一：上一条监督线程看到代次变了会自己退场，
+    // 免得用户手动重连之后有两条线程抢着起会话。
+    inner.signals.set_stopping(false);
+    inner.signals.set_suppress_errors(false);
+    inner.signals.bump();
+    let signals = Arc::clone(&inner.signals);
+    let watcher = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
         let mut slot = for_blocking
             .session
             .lock()
@@ -236,11 +270,22 @@ pub async fn connect(
         if let Some(previous) = slot.take() {
             previous.stop();
         }
-        *slot = Some(Session::start(cfg, events, for_session));
-        Ok(())
+        let session = Session::start(cfg, events, for_blocking_app, signals);
+        let watcher = session.watcher();
+        *slot = Some(session);
+        Ok(watcher)
     })
     .await
     .map_err(|error| format!("起会话失败：{error}"))??;
+
+    // 掉线之后自动重连（B2）：监督线程看着这条会话，断了就重起一条。
+    supervisor::watch(
+        inner.clone(),
+        cfg_for_watch,
+        notice.clone(),
+        watcher,
+        app.clone(),
+    );
 
     // 说话方式跟着连接一起生效：按住说话要在连上之后才注册热键（没连接时按键没意义）。
     inner.set_voice_mode(mode);
@@ -255,6 +300,9 @@ pub async fn connect(
 #[tauri::command]
 pub async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let inner = state.inner().clone();
+    // 先告诉监督线程「别重连了」，再停会话：反过来的话它会看到会话结束、
+    // 以为掉线了，立刻起一条新的。
+    inner.signals.set_stopping(true);
     let for_blocking = inner.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut slot = for_blocking
@@ -270,6 +318,16 @@ pub async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<()
     .map_err(|error| format!("停会话失败：{error}"))??;
     // 会话没了，热键也该收回去（否则那个键在别的程序里会继续被吃掉）。
     ptt::sync(&app, &inner)
+}
+
+/// 立刻重连，不等退避睡完（界面上那颗「立即重试」）。
+///
+/// 只是把监督线程的闹钟拨快：真正起会话的仍然是它，所以不会出现两条线程抢着连。
+/// 没有在重连时调它也不报错——那是界面上的按钮被点快了，不是错误。
+#[tauri::command]
+pub fn reconnect(state: State<'_, AppState>) -> Result<(), String> {
+    state.inner().signals.request_retry();
+    Ok(())
 }
 
 /// 换频道。

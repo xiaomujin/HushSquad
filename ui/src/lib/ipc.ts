@@ -194,6 +194,13 @@ export interface Handlers {
 export interface Backend {
   connect(req: ConnectRequest): Promise<void>;
   disconnect(): Promise<void>;
+  /**
+   * 立刻重连，不等退避睡完。
+   *
+   * 只对「重连中」有意义：真正的重连由 Rust 侧的监督线程做（它会重起一条会话、
+   * 回到原来的频道），这里只是把它的闹钟拨快。
+   */
+  reconnect(): Promise<void>;
   joinChannel(channelId: number): Promise<void>;
   /** 新建频道（需要 PERM.CREATE_CHANNEL）。maxUsers = 0 表示用服务器默认。 */
   createChannel(parentId: number, name: string, flags: number, maxUsers: number): Promise<void>;
@@ -459,6 +466,13 @@ export class MockBackend implements Backend {
 
   async setPtt(held: boolean): Promise<void> {
     this.#ptt = held;
+  }
+
+  async reconnect(): Promise<void> {
+    // Mock 没有真连接可断，重连就是「立刻回到频道里」。
+    this.#handlers?.onPhase('reconnecting');
+    await sleep(600);
+    this.#handlers?.onPhase('in_channel');
   }
 
   async pttSettings(): Promise<PttSettings> {
