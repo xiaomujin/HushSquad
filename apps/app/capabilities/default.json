@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口的最小权限集：只开 core 默认能力，外加频道流（Channel<T>）。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

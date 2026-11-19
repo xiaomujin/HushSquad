@@ -18,7 +18,7 @@
       麦克风 <span class="lv mono">{dbfs(app.meters.self_level)}</span>
     </div>
     <div class="seg"><i style="width:{levelPct(app.meters.self_level)}%"></i></div>
-    <div class="mic-dev">Microphone (USB Condenser Microphone) · 48 kHz</div>
+    <div class="mic-dev">48 kHz · 单声道 · 10 ms 帧</div>
   </div>
 
   <div class="ptt-wrap">
@@ -26,7 +26,7 @@
       class="ptt"
       class:on={sending}
       class:off={reconnecting || selfMute}
-      onclick={() => backend.setUser(app.selfUserId, { mute: !selfMute })}
+      onclick={() => backend.setSelf({ mute: !selfMute })}
     >
       <i class="vad"></i>{reconnecting ? modeLabel : selfMute ? '已静音' : sending ? '正在发送' : modeLabel}
     </button>
@@ -42,7 +42,7 @@
   </div>
 
   <div class="actions">
-    <button class="act" class:on={selfMute} onclick={() => backend.setUser(app.selfUserId, { mute: !selfMute })}>
+    <button class="act" class:on={selfMute} onclick={() => backend.setSelf({ mute: !selfMute })}>
       静音
     </button>
     <button class="act" class:on={app.deafen} onclick={() => backend.setSelf({ deafen: !app.deafen })}>闭听</button>

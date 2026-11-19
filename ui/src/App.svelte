@@ -10,6 +10,12 @@
     onPhase(phase, error) {
       app.phase = phase;
       app.error = error;
+      // 断线后本机的静音/闭听不会保留（新会话从「开麦、不闭听」开始），
+      // 界面跟着复位，否则按钮会显示一个已经不存在的状态。
+      if (phase === 'disconnected' || phase === 'error') {
+        app.selfMute = false;
+        app.deafen = false;
+      }
     },
     onChannels(channels, selfChannel) {
       app.channels = channels;

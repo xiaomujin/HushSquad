@@ -61,16 +61,25 @@ export interface Net {
   jitter_ms: number;
   jitter_target_ms: number;
   jitter_max_ms: number;
+  /** 序列号空洞推断出的丢包**个数**（含打点包占用的序号）。 */
   loss: number;
   rtt_p50: number;
   rtt_p95: number;
   underruns: number;
-  ring_drops: number;
+  /** 采集环满丢弃的样本数；后端没报就是 `undefined`。 */
+  ring_drops?: number;
   kbps: number;
-  /** 软件预算逐项（ADR-0010：承诺口径只含这些）。 */
-  budget: { capture: number; chain: number; encode: number; network: number; jitter: number; playout: number };
-  /** 设备段实测，单列，不进承诺值。 */
-  device: { digital_loopback_ms: number; acoustic_loopback_ms: number };
+  /** 实际 tick 频率。10 ms 节奏应当接近 100；明显偏低就是定时器粒度问题。 */
+  tick_hz?: number;
+  /**
+   * 软件预算逐项（ADR-0010：承诺口径只含这些）。
+   *
+   * 真后端**给不出**这一项：分解要跑一次自检，而自检还没接进会话。
+   * 缺省时面板显示「未测量」，不拿 0 冒充。
+   */
+  budget?: { capture: number; chain: number; encode: number; network: number; jitter: number; playout: number };
+  /** 设备段实测，单列，不进承诺值。同样来自自检。 */
+  device?: { digital_loopback_ms: number; acoustic_loopback_ms: number };
 }
 
 export interface ConnectRequest {
@@ -102,6 +111,12 @@ export interface Backend {
   setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void>;
   setUser(userId: number, patch: { volume?: number; mute?: boolean; solo?: boolean }): Promise<void>;
   setView(view: View): Promise<void>;
+  /**
+   * 忘掉这台服务器记住的证书指纹。
+   *
+   * TOFU 冲突（「指纹变了」）时这是唯一的出路——命令行里是 `--reset-trust`。
+   */
+  forgetTrust(addr: string): Promise<void>;
   selftest(kind: 'digital' | 'acoustic'): Promise<void>;
   subscribe(handlers: Handlers): () => void;
 }
@@ -148,6 +163,9 @@ export class MockBackend implements Backend {
   #meters: Meters = { talking: false, self_level: 0, tx: false, frames_sent: 0, chain_ms: 10, levels: {} };
   #frames = 0;
   #timers: ReturnType<typeof setInterval>[] = [];
+  // 单独存一份：`Net.budget` / `Net.device` 是可选字段，展开前得有个确定的类型。
+  #budget = { capture: 0, chain: 0.08, encode: 0.14, network: 0.3, jitter: 14, playout: 8 };
+  #device = { digital_loopback_ms: 34.3, acoustic_loopback_ms: 175.3 };
   #net: Net = {
     jitter_ms: 14,
     jitter_target_ms: 20,
@@ -158,8 +176,9 @@ export class MockBackend implements Backend {
     underruns: 0,
     ring_drops: 0,
     kbps: 32,
-    budget: { capture: 0, chain: 0.08, encode: 0.14, network: 0.3, jitter: 14, playout: 8 },
-    device: { digital_loopback_ms: 34.3, acoustic_loopback_ms: 175.3 },
+    tick_hz: 100,
+    budget: this.#budget,
+    device: this.#device,
   };
 
   async connect(_req: ConnectRequest): Promise<void> {
@@ -211,6 +230,8 @@ export class MockBackend implements Backend {
 
   async setView(_view: View): Promise<void> {}
 
+  async forgetTrust(_addr: string): Promise<void> {}
+
   async selftest(_kind: 'digital' | 'acoustic'): Promise<void> {}
 
   subscribe(handlers: Handlers): () => void {
@@ -248,10 +269,11 @@ export class MockBackend implements Backend {
     this.#timers.push(
       setInterval(() => {
         const jitter = 14 + Math.sin(performance.now() / 9000) * 1.5;
+        this.#budget = { ...this.#budget, jitter: Math.round(jitter * 10) / 10 };
         this.#net = {
           ...this.#net,
-          jitter_ms: Math.round(jitter * 10) / 10,
-          budget: { ...this.#net.budget, jitter: Math.round(jitter * 10) / 10 },
+          jitter_ms: this.#budget.jitter,
+          budget: this.#budget,
         };
         this.#handlers?.onNet(this.#net);
       }, 1000),

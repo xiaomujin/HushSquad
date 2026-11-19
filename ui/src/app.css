@@ -156,23 +156,30 @@ button.chip { font: inherit; cursor: pointer; }\n.chip.net { margin-left: auto; 
 
 /* ---------- 主区 ---------- */
 .main { padding: 20px 22px; display: flex; flex-direction: column; gap: 16px; overflow: hidden; min-width: 0; }
-.ch-head { display: flex; align-items: center; gap: 12px; }
-.ch-head h1 { font-size: 19px; font-weight: 600; letter-spacing: 0.01em; }
+/* 频道头：面板展开时主区只剩 ~490px，标题不许折行（折成「大 / 厅」很难看），
+   挤不下的 chips 换到第二行。 */
+.ch-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 6px; }
+.ch-head h1 { font-size: 19px; font-weight: 600; letter-spacing: 0.01em; white-space: nowrap; }
 .ch-head .meta { display: flex; gap: 7px; margin-left: 4px; }
-.viewtoggle { display: flex; gap: 2px; background: var(--surf); border: 1px solid var(--line); border-radius: 7px; padding: 2px; }
+.viewtoggle { display: flex; gap: 2px; background: var(--surf); border: 1px solid var(--line); border-radius: 7px; padding: 2px; margin-left: auto; }
 .viewtoggle button {
-  font: inherit; font-size: 11px; color: var(--tx3);
+  font: inherit; font-size: 11px; color: var(--tx3); white-space: nowrap;
   background: transparent; border: 0; border-radius: 5px;
   padding: 3px 10px; cursor: pointer;
 }
 .viewtoggle button.on { background: var(--surf3); color: var(--tx); }
 
 /* 网格 */
+/*
+ * 列宽固定上限 240px、从左上角排：1 个人时是一块 240×200 的砖，不是一块铺满整个
+ * 画布的巨砖；32 个人时自动折行。用 `auto-fit + 1fr` 的话人数少时砖会被拉得很宽，
+ * 而「小队里就两三个人」恰恰是最常见的情况。
+ */
 .tiles {
   flex: 1; display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  grid-auto-rows: minmax(0, 420px);
-  gap: 12px; align-content: center; overflow-y: auto;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 240px));
+  grid-auto-rows: 200px;
+  gap: 12px; align-content: start; justify-content: start; overflow-y: auto;
 }
 .tile {
   height: 100%; border-radius: 10px; border: 1px solid var(--line);
@@ -299,6 +306,8 @@ input[type='range']::-webkit-slider-thumb:hover { background: var(--tx); }
   background: var(--surf); border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px;
 }
 .note b { color: var(--tx2); font-weight: 600; }
+/* 自检报错用：与提示同一块，只换颜色，避免再加一种盒子。 */
+.note.warn { color: var(--warn); border-color: #5a462a; }
 .gauge { height: 6px; border-radius: 3px; background: var(--surf3); position: relative; overflow: hidden; }
 .gauge .band { position: absolute; top: 0; bottom: 0; background: rgba(95, 227, 161, 0.16); border-left: 1px solid var(--acc-dim); border-right: 1px solid var(--acc-dim); }
 .gauge .now { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--acc); }

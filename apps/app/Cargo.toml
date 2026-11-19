@@ -1,0 +1,55 @@
+# HushSquad 桌面外壳（Tauri 2 + WebView2）。
+#
+# 这个 crate 是**独立的 workspace**，不是根 workspace 的成员 —— 见
+# docs/ADR/ADR-0014-桌面外壳与门禁的边界.md。一句话：Tauri 的依赖树有几百个 crate，
+# 还要 WebView2 / webkit2gtk 这类系统库；把它塞进 `cargo clippy --workspace` 会让
+# 「音频链路是否还干净」这件事被 GUI 工具链绑架。所以：
+#
+#   - 音频门禁（scripts/check.ps1）只覆盖根 workspace；
+#   - 外壳自己的门禁是 scripts/check-app.ps1（fmt / clippy / build）；
+#   - 两者共享同一批 path 依赖，代码只有一份。
+#
+# 依赖方向（硬约束，与根 Cargo.toml 的注释一致）：ui → app → client-core。
+
+[package]
+name = "hushsquad-app"
+description = "HushSquad 桌面外壳：把 ui/ 的界面接到客户端会话上。"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+# 独立 workspace 的标记。没有它，根 workspace 的 `apps/*` 会把这个包当成成员。
+[workspace]
+
+[lib]
+name = "hushsquad_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hushsquad-app"
+path = "src/main.rs"
+
+[features]
+# 与 Tauri 2 模板一致：默认把 ui/dist 编进二进制（`tauri://localhost` 直接读内嵌资源），
+# 这样 `cargo run -p hushsquad-app` 不需要先起 dev server 就能跑出真窗口。
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "sync", "net", "io-util", "macros"] }
+hushsquad-client = { path = "../client" }
+audio-io = { path = "../../crates/audio-io" }
+client-core = { path = "../../crates/client-core" }
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+# 与根 workspace 保持同一套取舍：要接近 release 的性能，但保留符号。
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

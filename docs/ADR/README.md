@@ -19,6 +19,7 @@
 | ADR-0011 | MCU 混音不在 v1，协议保留 codec_mode 占位 | 已定 | 待补 |
 | ADR-0012 | 协议不追求 Mumble 客户端互通，仅参考数据模型 | 已定 | 待补 |
 | ADR-0013 | 前端：Svelte 5 + Vite + TS（runes，不引状态库）；前端只是渲染器，状态真相在 Rust，IPC 契约单文件，高频数据走 `Channel<T>` | 已定 | [ADR-0013](ADR-0013-前端框架与渲染器边界.md) |
+| ADR-0014 | 桌面外壳 `apps/app`（Tauri 2）是独立 workspace，不进音频门禁；会话观察点是普通 Rust trait，不带 tauri 依赖 | 已定 | [ADR-0014](ADR-0014-桌面外壳与门禁的边界.md) |
 
 ## 何时必须新建 ADR
 

@@ -30,9 +30,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::client::TlsStream;
 
-use crate::audio::{Capture, Playout};
+use crate::audio::{Capture, LevelMeter, Playout};
 use crate::config::{Config, FRAME_MS};
 use crate::control::{self, Trust};
+use crate::host::{ChannelView, Command, Host, MemberView, MetersView, NetView, Phase, StateView};
 
 /// 收发节奏。
 const TICK: Duration = Duration::from_millis(FRAME_MS);
@@ -62,6 +63,17 @@ const GC_INTERVAL: Duration = Duration::from_secs(5);
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// 多久没包就认为这个人不在了（且不在成员表里时才回收）。
 const PEER_IDLE_MS: u64 = 60_000;
+/// 电平推送间隔（以 tick 计）。100 Hz / 2 = 20 Hz，与界面刷新率对齐。
+const METERS_EVERY: u64 = 2;
+/// 网络数字推送间隔。
+const NET_INTERVAL: Duration = Duration::from_secs(5);
+/// 最近这么多毫秒内收到过语音包就算「在说话」。
+const SPEAKING_WINDOW_MS: u64 = 500;
+/// 音量拉到 0 时给混音器的增益（dB）。
+///
+/// 不用 `-inf`：真正的静音走 `set_muted`，这里只是把 0 档变成一个「听不见但有限」的值，
+/// 免得依赖混音器对无穷大的处理。
+const MIN_GAIN_DB: f32 = -60.0;
 
 fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -87,8 +99,31 @@ struct Peer {
     path: ReceivePath,
     /// 没有扬声器时 PCM 没人取，由我们自己抽干，否则统计里的「环满丢弃」全是假的。
     drain: Option<PcmReceiver>,
+    /// 这一路在混音器里的电平读数（没有扬声器时为 `None`）。
+    meter: Option<LevelMeter>,
     packets: u64,
     last_ms: u64,
+}
+
+/// 本机对某个人的设置。**不进服务器**，只作用在本地混音器上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalPrefs {
+    /// 显示音量 0–200，100 = 原样。
+    volume: u16,
+    /// 本机静音。
+    mute: bool,
+    /// 本机独听。
+    solo: bool,
+}
+
+impl Default for LocalPrefs {
+    fn default() -> Self {
+        Self {
+            volume: 100,
+            mute: false,
+            solo: false,
+        }
+    }
 }
 
 /// 上行音源：真麦克风，或合成正弦音。
@@ -183,12 +218,38 @@ pub struct Summary {
 }
 
 /// 客户端状态。
-pub struct App {
+pub struct App<'a> {
     cfg: Config,
     client: Client,
     source: Option<Source>,
     playout: Option<Playout>,
     events: Receiver<audio_io::StreamEvent>,
+    /// 外壳的观察点。命令行模式下是 `None`，行为与没有它时完全一致。
+    host: Option<&'a dyn Host>,
+    /// 本机静音（不发上行）。
+    muted: bool,
+    /// 本机闭听（不听别人）。
+    deafened: bool,
+    /// 本机对每个人的设置（音量 / 静音 / 独听），只作用在本地混音器上。
+    prefs: BTreeMap<u32, LocalPrefs>,
+    /// 当前阶段。
+    phase: Phase,
+    /// 状态变了，下一个 tick 推给外壳。
+    dirty: bool,
+    /// 上一次推出去的状态（相等就不再推）。
+    last_state: Option<StateView>,
+    /// 上一次推网络数字的时刻。
+    last_net_emit: Instant,
+    /// 自上次推送以来的上行峰值。
+    self_level: f32,
+    /// 这一段里发过语音包。
+    tx_since_emit: bool,
+    /// 上行处理链的算法延迟（毫秒）。
+    chain_ms: f32,
+    /// 等服务器确认的频道（`None` 表示没有正在进行的切换）。
+    pending_join: Option<u32>,
+    /// 外壳要求断开。
+    quit: bool,
     peers: BTreeMap<u32, Peer>,
     /// sender_id → 最后一次听到他语音的时刻（毫秒）。
     last_voice: BTreeMap<u32, u64>,
@@ -225,6 +286,25 @@ const LATE_TICK_MS: u64 = 15;
 const DRIFT_DISPLAY_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 /// 跑一次完整会话：起音频、连服务器、进频道、收发，直到退出。
 pub async fn run(cfg: Config) -> Result<Summary, String> {
+    run_with(cfg, None).await
+}
+
+/// 与 [`run`] 相同，但多一个外壳观察点：状态推给它，指令从它那里拉。
+///
+/// 两种模式共用同一条实现（[`run_inner`]），所以「命令行能跑通」和「界面能跑通」
+/// 不会变成两套行为。外壳那边拿到的是 [`StateView`] / [`MetersView`] / [`NetView`]。
+pub async fn run_with(cfg: Config, host: Option<Box<dyn Host>>) -> Result<Summary, String> {
+    let outcome = run_inner(cfg, host.as_deref()).await;
+    // 失败也要让外壳知道「为什么」——否则界面上只会看到一个不动的「连接中」。
+    match &outcome {
+        Ok(_) => announce(host.as_deref(), Phase::Disconnected, None, None),
+        Err(error) => announce(host.as_deref(), Phase::Error, Some(error.clone()), None),
+    }
+    outcome
+}
+
+/// 真正的会话流程。
+async fn run_inner(cfg: Config, host: Option<&dyn Host>) -> Result<Summary, String> {
     // 必须最先做：Windows 默认定时器粒度 15.6 ms，会把 10 ms 的收发节奏拉成 64 Hz（见 timer 模块）。
     let timer = crate::timer::TimerResolution::raise();
     if !cfg.quiet {
@@ -239,6 +319,8 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
     }
 
     let (events_tx, events_rx) = channel();
+
+    announce(host, Phase::Authenticating, None, None);
 
     // ---- 1. 先把音频起来：起不来就别连了 ----
     let playout = if cfg.no_speaker {
@@ -383,6 +465,7 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
         !c.roster().channels().is_empty()
     })
     .await?;
+    announce(host, Phase::Connected, None, Some(&client));
     // 服务器在密码登录成功时会下发一个设备 token，存下来下次免密。
     if let Some(token) = client.take_device_token() {
         let guard = local.lock().expect("锁没中毒");
@@ -420,6 +503,7 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
         c.channel_epoch() != 0
     })
     .await?;
+    announce(host, Phase::InChannel, None, Some(&client));
     if !cfg.quiet {
         let name = client
             .roster()
@@ -433,12 +517,29 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
     }
 
     // ---- 5. 事件循环 ----
+    let chain_ms = match &source {
+        Some(Source::Capture(capture)) => capture.chain_latency_ms(),
+        _ => 0.0,
+    };
     let mut app = App {
         cfg,
         client,
         source,
         playout,
         events: events_rx,
+        host,
+        muted: false,
+        deafened: false,
+        prefs: BTreeMap::new(),
+        phase: Phase::InChannel,
+        dirty: true,
+        last_state: None,
+        last_net_emit: Instant::now(),
+        self_level: 0.0,
+        tx_since_emit: false,
+        chain_ms,
+        pending_join: None,
+        quit: false,
         peers: BTreeMap::new(),
         last_voice: BTreeMap::new(),
         frames_out: 0,
@@ -469,7 +570,7 @@ pub async fn run(cfg: Config) -> Result<Summary, String> {
     let summary = app.summary();
     outcome.map(|()| summary)
 }
-impl App {
+impl<'a> App<'a> {
     /// 事件循环。
     async fn drive(&mut self, control: TlsStream<TcpStream>, udp: UdpSocket) -> Result<(), String> {
         let (mut reader, mut writer) = tokio::io::split(control);
@@ -500,6 +601,9 @@ impl App {
             tokio::select! {
                 _ = tick.tick() => {
                     self.on_tick(&udp, &mut writer).await?;
+                    if self.quit {
+                        return Ok(());
+                    }
                 }
                 message = rx.recv() => {
                     let Some(bytes) = message else {
@@ -552,6 +656,8 @@ impl App {
             self.max_late_ms = self.max_late_ms.max(gap_ms);
         }
         self.on_stream_events();
+        // 指令先执行：静音要在这一 tick 的发包上就生效，不能等到下一个 10 ms。
+        self.drain_commands(writer).await?;
         self.send_voice(udp);
         for peer in self.peers.values_mut() {
             peer.path.tick();
@@ -584,6 +690,17 @@ impl App {
                 println!("{}", self.stats_line());
             }
         }
+        // 推给外壳。三种节奏各不相同，见 host.rs 的表。
+        if self.ticks.is_multiple_of(METERS_EVERY) {
+            self.publish_meters();
+        }
+        if self.dirty {
+            self.publish_state();
+        }
+        if self.last_net_emit.elapsed() >= NET_INTERVAL {
+            self.last_net_emit = Instant::now();
+            self.publish_net();
+        }
         Ok(())
     }
 
@@ -605,6 +722,11 @@ impl App {
                 break;
             };
             let peak = frame.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()));
+            // 电平在**静音之前**取：界面上「麦克风有信号但没在发」正是静音该有的样子。
+            self.self_level = self.self_level.max(peak);
+            if self.muted {
+                continue;
+            }
 
             // DTX：安静够久就停发，只在边界发一个静音标记。默认关闭 ——
             // 一直发也有好处（NAT 保活、抖动统计连续），要不要省流量由用户决定。
@@ -635,13 +757,20 @@ impl App {
                 continue;
             }
             match self.client.encode_voice(&opus[..len], &mut packet) {
-                Ok(n) => transmit(
-                    udp,
-                    &packet[..n],
-                    &mut self.frames_out,
-                    &mut self.bytes_out,
-                    &mut self.send_errors,
-                ),
+                Ok(n) => {
+                    let sent = self.frames_out;
+                    transmit(
+                        udp,
+                        &packet[..n],
+                        &mut self.frames_out,
+                        &mut self.bytes_out,
+                        &mut self.send_errors,
+                    );
+                    // 只有真的发出去了才算「上行在发」；发失败要能从界面上看出来。
+                    if self.frames_out > sent {
+                        self.tx_since_emit = true;
+                    }
+                }
                 Err(e) => {
                     self.send_errors += 1;
                     eprintln!("加密语音失败：{e}");
@@ -683,6 +812,21 @@ impl App {
             .client
             .on_bytes(bytes)
             .map_err(|e| format!("控制面分帧失败：{e}"))?;
+        // 成员/频道有任何变化都重推一次状态（`Client` 已经更新过镜像了）。
+        if actions
+            .iter()
+            .any(|action| matches!(action, ClientAction::RosterChanged))
+        {
+            self.dirty = true;
+        }
+        // 服务器确认了换频道：`ChannelSync` 里带着我的新 channel_id。
+        if let Some(channel_id) = self.pending_join
+            && self.client.roster().my_channel() == channel_id
+        {
+            self.pending_join = None;
+            self.phase = Phase::InChannel;
+            self.dirty = true;
+        }
         write_actions(writer, actions).await
     }
 
@@ -742,16 +886,20 @@ impl App {
                     ..audio_core::DriftConfig::default()
                 });
             }
-            // 有扬声器就把 PCM 交给混音器；没有就自己抽干，别让环满污染统计。
+            // 有扬声器就把 PCM 交给混音器（外面包一层电平表，界面要「每个人多大声」）；
+            // 没有就自己抽干，别让环满污染统计。
+            let mut meter = None;
             let drain = match &self.playout {
                 Some(playout) => {
+                    let (source, handle) = crate::audio::MeteredSource::new(pcm);
                     if playout
                         .mix()
-                        .add_track(usize::from(slot), Box::new(pcm))
+                        .add_track(usize::from(slot), Box::new(source))
                         .is_err()
                     {
                         return;
                     }
+                    meter = Some(handle);
                     None
                 }
                 None => Some(pcm),
@@ -763,10 +911,14 @@ impl App {
                     tx,
                     path,
                     drain,
+                    meter,
                     packets: 0,
                     last_ms: now_ms(),
                 },
             );
+            // 新挂上来的这一路要立刻吃一遍本机设置（音量/静音/闭听），
+            // 否则「静音某人」只对他之后发的包生效，而他之前就已经在混音器里了。
+            self.sync_mixer();
         }
         if let Some(peer) = self.peers.get_mut(&sender_id) {
             if peer.tx.send(packet) {
@@ -817,6 +969,196 @@ impl App {
             }
         }
     }
+    /// 把外壳发来的指令执行掉。每个 tick 一次，所以指令延迟上限就是一个 tick（10 ms）。
+    async fn drain_commands(
+        &mut self,
+        writer: &mut WriteHalf<TlsStream<TcpStream>>,
+    ) -> Result<(), String> {
+        while let Some(command) = self.host.and_then(|host| host.command()) {
+            match command {
+                Command::SetMute(muted) => {
+                    self.muted = muted;
+                    self.dirty = true;
+                }
+                Command::SetDeafen(deafened) => {
+                    self.deafened = deafened;
+                    self.sync_mixer();
+                    self.dirty = true;
+                }
+                Command::SetUser {
+                    user_id,
+                    volume,
+                    mute,
+                    solo,
+                } => {
+                    let prefs = self.prefs.entry(user_id).or_default();
+                    if let Some(volume) = volume {
+                        prefs.volume = volume.min(200);
+                    }
+                    if let Some(mute) = mute {
+                        prefs.mute = mute;
+                    }
+                    if let Some(solo) = solo {
+                        prefs.solo = solo;
+                    }
+                    self.sync_mixer();
+                    self.dirty = true;
+                }
+                Command::JoinChannel(channel_id) => {
+                    let action = self.client.join_channel(channel_id);
+                    write_actions(writer, vec![action]).await?;
+                    self.pending_join = Some(channel_id);
+                    self.phase = Phase::Joining;
+                    self.dirty = true;
+                }
+                Command::Disconnect => self.quit = true,
+            }
+        }
+        Ok(())
+    }
+
+    /// 把本机设置（音量 / 静音 / 独听 / 闭听）刷到混音器的每一路上。
+    ///
+    /// 全量刷而不是增量改：最多 32 路，一次几个原子写，比维护「哪一路脏了」简单得多，
+    /// 而且天然不会漏（比如闭听时新挂上来的那一路）。
+    fn sync_mixer(&self) {
+        let Some(playout) = &self.playout else {
+            return;
+        };
+        let roster = self.client.roster();
+        for (&sender_id, peer) in &self.peers {
+            let slot = usize::from(peer.slot);
+            let prefs = roster
+                .members()
+                .values()
+                .find(|member| member.sender_id == sender_id)
+                .map_or_else(LocalPrefs::default, |member| {
+                    self.prefs.get(&member.user_id).copied().unwrap_or_default()
+                });
+            let _ = playout
+                .mix()
+                .set_muted(slot, self.deafened || prefs.mute || prefs.volume == 0);
+            let _ = playout.mix().set_solo(slot, prefs.solo && !self.deafened);
+            let gain_db = if prefs.volume == 0 {
+                MIN_GAIN_DB
+            } else {
+                20.0 * (f32::from(prefs.volume) / 100.0).log10()
+            };
+            let _ = playout.mix().set_gain_db(slot, gain_db);
+        }
+    }
+
+    /// 20 Hz 电平推送。
+    fn publish_meters(&mut self) {
+        // 先把要清零的量取出来，再借 `host`（否则 `&mut self` 与 `&self.host` 打架）。
+        let self_level = std::mem::take(&mut self.self_level);
+        let tx = std::mem::take(&mut self.tx_since_emit);
+        let Some(host) = self.host else {
+            return;
+        };
+        let now = now_ms();
+        let roster = self.client.roster();
+        let mut levels: BTreeMap<u32, f32> = BTreeMap::new();
+        if self_level > 0.0 {
+            levels.insert(roster.self_user_id(), self_level.min(1.0));
+        }
+        let mut talking = false;
+        for (&sender_id, peer) in &self.peers {
+            let Some(member) = roster
+                .members()
+                .values()
+                .find(|member| member.sender_id == sender_id)
+            else {
+                continue;
+            };
+            if let Some(meter) = &peer.meter {
+                let level = meter.take();
+                if level > 0.0 {
+                    levels.insert(member.user_id, level.min(1.0));
+                }
+            }
+            if self
+                .last_voice
+                .get(&sender_id)
+                .is_some_and(|at| now.saturating_sub(*at) <= SPEAKING_WINDOW_MS)
+            {
+                talking = true;
+            }
+        }
+        host.meters(&MetersView {
+            talking,
+            self_level,
+            tx,
+            frames_sent: self.frames_out,
+            chain_ms: self.chain_ms,
+            levels,
+        });
+    }
+
+    /// 状态推送：只有变了才推。
+    fn publish_state(&mut self) {
+        let state = self.state_now();
+        self.dirty = false;
+        if self.last_state.as_ref() == Some(&state) {
+            return;
+        }
+        if let Some(host) = self.host {
+            host.state(&state);
+        }
+        self.last_state = Some(state);
+    }
+
+    /// 5 s 一次的网络数字。
+    fn publish_net(&self) {
+        let Some(host) = self.host else {
+            return;
+        };
+        let mut jitter_ms = 0;
+        let mut jitter_target_ms = 0;
+        let mut loss = 0;
+        for peer in self.peers.values() {
+            jitter_ms = jitter_ms.max(peer.path.buffered_ms());
+            jitter_target_ms = jitter_target_ms.max(peer.path.target_delay_ms());
+            loss += peer.path.stats().packets_lost;
+        }
+        let underruns = self.playout.as_ref().map_or(0, |playout| {
+            playout
+                .counters()
+                .underruns
+                .load(std::sync::atomic::Ordering::Relaxed)
+        });
+        let seconds = self.started.elapsed().as_secs_f64().max(0.001);
+        let to_ms = |us: Option<u32>| us.map_or(0.0, |us| us as f32 / 1000.0);
+        host.net(&NetView {
+            jitter_ms,
+            jitter_target_ms,
+            jitter_max_ms: self.cfg.jitter_max_ms,
+            loss,
+            rtt_p50_ms: to_ms(percentile(&self.rtt_us, 0.5)),
+            rtt_p95_ms: to_ms(percentile(&self.rtt_us, 0.95)),
+            underruns,
+            kbps: (self.bytes_out as f64 * 8.0 / 1000.0 / seconds) as f32,
+            tick_hz: (self.ticks as f64 / seconds) as f32,
+        });
+    }
+
+    /// 当前状态的快照。
+    fn state_now(&self) -> StateView {
+        let roster = self.client.roster();
+        StateView {
+            phase: self.phase,
+            // 错误不走这里：会话循环一退出，`run_with` 就用 `announce` 推一条带原因的
+            // `Phase::Error`（那时 `App` 已经没了）。放在这里只会是一个永远为 `None` 的字段。
+            error: None,
+            self_user_id: roster.self_user_id(),
+            self_channel: roster.my_channel(),
+            muted: self.muted,
+            deafened: self.deafened,
+            channels: channel_views(&self.client),
+            members: member_views(&self.client, &self.prefs, &self.last_voice, now_ms()),
+        }
+    }
+
     /// 一行统计，键值对，方便直接 grep / 贴进报告。
     fn stats_line(&self) -> String {
         let mut lost = 0_u64;
@@ -1041,6 +1383,78 @@ impl App {
         }
     }
 }
+/// 握手期间把阶段推给外壳（还没有 `App` 的时候）。
+fn announce(host: Option<&dyn Host>, phase: Phase, error: Option<String>, client: Option<&Client>) {
+    let Some(host) = host else {
+        return;
+    };
+    host.state(&StateView {
+        phase,
+        error,
+        self_user_id: client.map_or(0, |client| client.roster().self_user_id()),
+        self_channel: client.map_or(0, |client| client.roster().my_channel()),
+        muted: false,
+        deafened: false,
+        channels: client.map_or_else(Vec::new, channel_views),
+        members: client.map_or_else(Vec::new, |client| {
+            member_views(client, &BTreeMap::new(), &BTreeMap::new(), now_ms())
+        }),
+    });
+}
+
+/// 频道树（扁平表，前端按 `parent` 拼）。
+fn channel_views(client: &Client) -> Vec<ChannelView> {
+    let roster = client.roster();
+    let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
+    for member in roster.members().values() {
+        *counts.entry(member.channel_id).or_default() += 1;
+    }
+    roster
+        .channels()
+        .values()
+        .map(|channel| ChannelView {
+            id: channel.id,
+            parent: channel.parent,
+            name: channel.name.clone(),
+            position: channel.position,
+            max_users: channel.max_users,
+            flags: channel.flags,
+            members: counts.get(&channel.id).copied().unwrap_or(0),
+        })
+        .collect()
+}
+
+/// 成员表（含本机设置与「在说话」）。
+fn member_views(
+    client: &Client,
+    prefs: &BTreeMap<u32, LocalPrefs>,
+    last_voice: &BTreeMap<u32, u64>,
+    now: u64,
+) -> Vec<MemberView> {
+    let roster = client.roster();
+    let mut views: Vec<MemberView> = roster
+        .members()
+        .values()
+        .map(|member| {
+            let local = prefs.get(&member.user_id).copied().unwrap_or_default();
+            MemberView {
+                user_id: member.user_id,
+                name: member.name.clone(),
+                channel_id: member.channel_id,
+                mute: local.mute,
+                solo: local.solo,
+                server_mute: member.server_mute,
+                volume: local.volume,
+                speaking: last_voice
+                    .get(&member.sender_id)
+                    .is_some_and(|at| now.saturating_sub(*at) <= SPEAKING_WINDOW_MS),
+            }
+        })
+        .collect();
+    views.sort_unstable_by_key(|member| member.user_id);
+    views
+}
+
 /// 发一个语音面包，并记账。
 ///
 /// 做成自由函数（而不是 `&mut self` 的方法）是为了让调用点能**分开借**：

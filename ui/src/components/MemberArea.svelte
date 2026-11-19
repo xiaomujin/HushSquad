@@ -35,7 +35,7 @@
         <div class="bar"><i style="width:{levelPct(level(m.user_id))}%"></i></div>
         <div class="t-ctl">
           {#if isSelf(m.user_id)}
-            <button class="mini" class:on={m.mute} onclick={() => backend.setUser(m.user_id, { mute: !m.mute })}>
+            <button class="mini" class:on={m.mute} onclick={() => backend.setSelf({ mute: !m.mute })}>
               {m.mute ? '取消静音' : '静音自己'}
             </button>
             <button class="mini" onclick={() => backend.setSelf({ deafen: !app.deafen })}>闭听</button>

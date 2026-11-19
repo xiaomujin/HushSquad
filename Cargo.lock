@@ -939,6 +939,7 @@ dependencies = [
  "rcgen",
  "rpassword",
  "rtrb",
+ "serde",
  "server-core",
  "store",
  "tokio",

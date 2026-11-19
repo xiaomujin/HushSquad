@@ -28,9 +28,11 @@ pub mod app;
 pub mod audio;
 pub mod config;
 pub mod control;
+pub mod host;
 pub mod local;
 pub mod timer;
 pub mod voice;
 
-pub use app::{App, PeerSummary, Summary, run};
+pub use app::{App, PeerSummary, Summary, run, run_with};
 pub use config::Config;
+pub use host::{Command, Host, MetersView, NetView, Phase, StateView};

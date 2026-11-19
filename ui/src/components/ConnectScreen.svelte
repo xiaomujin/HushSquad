@@ -3,19 +3,40 @@
   import { app } from '../lib/state.svelte';
 
   let busy = $state(false);
+  let failure = $state('');
+  let info = $state('');
+
+  // 握手在后台线程上做：`busy` 只覆盖「把命令发出去」这一瞬间，
+  // 真正在等的是阶段变成 authenticating 之后、connected 之前。
+  const connecting = $derived(busy || app.phase === 'authenticating');
 
   async function connect(): Promise<void> {
-    if (busy) return;
+    if (connecting) return;
     busy = true;
+    failure = '';
+    info = '';
     try {
       await backend.connect({
         addr: app.addr,
         identity: { kind: 'anonymous' },
-        // 首次连接：记住指纹。真实实现由 Rust 侧落盘（TOFU）。
-        trust: { kind: 'remember', fingerprint: '3A:9F:2C:71:8D' },
+        // 信任策略由 Rust 侧的 TOFU 决定：第一次记住指纹，变了就拒绝。
+        trust: { kind: 'remember', fingerprint: 'tofu' },
       });
+    } catch (error) {
+      failure = String(error);
     } finally {
       busy = false;
+    }
+  }
+
+  async function forget(): Promise<void> {
+    failure = '';
+    info = '';
+    try {
+      await backend.forgetTrust(app.addr);
+      info = '已忘掉这台服务器的指纹，再点一次「连接」会重新记住新的。';
+    } catch (error) {
+      failure = String(error);
     }
   }
 </script>
@@ -52,30 +73,36 @@
     <label class="f">身份
       <div class="seg-ctl">
         <button class="on">匿名（这台设备）</button>
-        <button>账号</button>
+        <button disabled title="账号登录还没接到界面上">账号</button>
       </div>
     </label>
 
     <div class="cert">
-      <div class="h"><span class="dot ok"></span>首次连接这台服务器 · 记住它的指纹</div>
-      <div class="fp">
-        SHA-256 3A:9F:2C:71:8D:04:B6:E1:52:7C:9A:33:F0:6E:18:BD:<br />
-        7B:22:C5:40:9D:31:8E:66:AF:10:47:58:D2:03:9C:4E
-      </div>
-      <div class="btns">
-        <button class="btn">信任并记住</button>
-        <button class="btn">不信任</button>
+      <div class="h"><span class="dot ok"></span>首次连接这台服务器 · 会记住它的指纹</div>
+      <div class="tiny">
+        连上之后由 Rust 侧把证书指纹存进本地库；下次指纹变了会直接拒绝并提示你确认。
+        这里不预先显示指纹——连之前它还不存在。
       </div>
     </div>
-    <div class="tiny">指纹变了会直接拒绝连接，除非你在这里点「重新信任」。证书不写进系统钥匙串。</div>
 
-    <button class="btn-primary" onclick={connect} disabled={busy}>
-      {busy ? '连接中…' : '连接'}
+    {#if app.phase === 'error' && app.error}
+      <div class="note warn">{app.error}</div>
+    {/if}
+    {#if failure}
+      <div class="note warn">{failure}</div>
+    {/if}
+    {#if info}
+      <div class="note">{info}</div>
+    {/if}
+
+    <button class="btn-primary" onclick={connect} disabled={connecting}>
+      {connecting ? '连接中…' : '连接'}
     </button>
 
-    <div class="recent">
-      <div class="it"><span class="dot ok"></span>家里 · 局域网<span class="ad">hushsquad.lan:8443</span><span class="ms">14 ms</span></div>
-      <div class="it"><span class="dot"></span>公司<span class="ad">hushsquad.internal:8443</span><span class="ms">—</span></div>
-    </div>
+    {#if failure || app.phase === 'error'}
+      <div class="btns">
+        <button class="btn" onclick={forget}>忘掉这台服务器的指纹并重试</button>
+      </div>
+    {/if}
   </div>
 </div>

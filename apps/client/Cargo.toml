@@ -28,6 +28,9 @@ tokio-rustls = { workspace = true }
 store = { path = "../../crates/store", version = "0.0.0" }
 rtrb = { workspace = true }
 rpassword = { workspace = true }
+# 只为了让 `host` 的视图类型能直接序列化给外壳（Tauri / 将来的 Web），
+# 不参与任何实时路径。
+serde = { workspace = true }
 
 # 定时器精度（timeBeginPeriod）。版本与 feature 集对齐 audio-io 已经拉进来的那一份，
 # 避免多编译一遍 windows。

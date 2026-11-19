@@ -29,7 +29,8 @@ ui/
 │   ├── app.css               # 视觉 token + 组件样式（与 mockup.html 共用同一份变量）
 │   ├── lib/
 │   │   ├── ipc.ts            # ★ 命令与事件的唯一定义处 + MockBackend
-│   │   ├── backend.ts        # 后端实例（现在固定 Mock，接 Tauri 时只改这里）
+│   │   ├── backend.ts        # 后端实例：Tauri 里用真的，浏览器里用 Mock
+│   │   ├── tauri-backend.ts  # 真后端：invoke 转发 + Channel<Event> 分派
 │   │   ├── state.svelte.ts   # 镜像（runes），只有快照，没有本地真相
 │   │   ├── tree.ts           # 扁平频道表 → 可渲染的行（折叠、深度、子树人数）
 │   │   └── format.ts         # 头像字、电平百分比、dBFS 显示
@@ -47,15 +48,35 @@ ui/
 
 ## Mock 与真实后端
 
-`src/lib/ipc.ts` 定义了 `Backend` 接口，`MockBackend` 是它的浏览器实现（假数据 + 定时器，
-20 Hz 电平、1 Hz 网络数字）。Tauri 壳接进来之后，写一个 `TauriBackend` 实现同一接口，
-把 `src/lib/backend.ts` 里的一行换掉即可——组件一行都不用改。
+`src/lib/ipc.ts` 定义了 `Backend` 接口，两份实现：
+
+| 实现 | 什么时候用 | 数据来源 |
+|---|---|---|
+| `MockBackend`（同文件） | `pnpm dev`，浏览器里看界面 | 假数据 + 定时器（20 Hz 电平、1 Hz 网络） |
+| `TauriBackend`（`tauri-backend.ts`） | `apps/app` 窗口里 | 真客户端会话，`Channel<Event>` 推送 |
+
+`src/lib/backend.ts` 用 `window.__TAURI_INTERNALS__` 是否存在来选，组件一行都不用知道。
+
+真后端只做三件事：命令转发、事件分派、**字段改名**（Rust 用 `_ms` 后缀，界面不用）。
+业务逻辑一律不写在这一层——它一长，就说明 Rust 侧漏了东西。
 
 约定（ADR-0013）：
 
-- 低频「状态变了」（连接状态、频道树、成员增删）→ Tauri `emit`；
-- 高频「数字在动」（电平、VAD、抖动缓冲、RTT）→ Tauri 2 的 `Channel<T>`，20 Hz 合并推送；
+- 低频「状态变了」（连接状态、频道树、成员增删）→ 变化时才推（`Host::state`）；
+- 高频「数字在动」（电平、抖动缓冲）→ 20 Hz（`Host::meters`）；网络数字 0.2 Hz（`Host::net`）；
+- 三条流共用**一个** `Channel<Event>`，前端按 `kind` 分派；
 - 前端不做定时轮询，不在本地算延迟，不做乐观更新（音量滑杆例外：拖动时本地跟随）。
+
+## 在 Tauri 窗口里跑
+
+```powershell
+pwsh -File scripts/check-app.ps1          # 前端 check + build，再编外壳（顺序不能反）
+& apps/app/target/debug/hushsquad-app.exe
+```
+
+`frontendDist` 是**编译期内嵌**的：改了 `ui/` 必须重新 `pnpm build` 再 `cargo build`，
+否则窗口里跑的还是上一版资源。`beforeBuildCommand` 只在 `tauri build` 时生效。
+
 
 ## 评审用的 URL 参数（只影响 Mock）
 

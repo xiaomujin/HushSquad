@@ -20,7 +20,7 @@ class AppState {
 
   voice = $state<VoiceSettings>({ mode: 'vad', threshold_db: -38, preroll_frames: 30 });
   chain = $state('highpass,rnn,agc2');
-  addr = $state('hushsquad.lan:8443');
+  addr = $state('127.0.0.1:64738');
 
   /** 折叠的分组 / 有子节点的频道 id。 */
   collapsed = $state<number[]>([]);

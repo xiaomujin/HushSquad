@@ -3,6 +3,7 @@
   import ChannelTree from './ChannelTree.svelte';
   import MemberArea from './MemberArea.svelte';
   import NetworkPanel from './NetworkPanel.svelte';
+  import { initial } from '../lib/format';
   import { app } from '../lib/state.svelte';
 
   let { onsettings }: { onsettings: () => void } = $props();
@@ -71,7 +72,7 @@
     </div>
 
     <div class="me">
-      <div class="ava sm a1">{app.self?.name.slice(0, 1) ?? '我'}</div>
+      <div class="ava sm a1">{initial(app.self?.name ?? '')}</div>
       <div>
         <div class="me-nm">{app.self?.name ?? '我'}</div>
         <div class="me-sb">匿名 · 这台设备</div>

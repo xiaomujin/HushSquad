@@ -28,6 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
+use audio_core::mix::TrackSource;
+use audio_core::receive::PcmReceiver;
 use audio_core::{
     AudioCodec, Chain, ChainDesc, FRAME_SAMPLES, Frame, MixControl, MixStats, Mixer, OpusCodec,
     SAMPLE_RATE,
@@ -81,6 +83,60 @@ impl MixCounters {
     #[must_use]
     pub fn peak(&self) -> f32 {
         f32::from_bits(self.peak_bits.load(Ordering::Relaxed))
+    }
+}
+
+/// 在混音器取数据的那条路上量电平。
+///
+/// 为什么要包一层：混音器的统计只有**全局**峰值，而界面要的是「每个人多大声」。
+/// 唯一能拿到逐轨数据的地方就是 [`TrackSource::pull_frame`] —— 它跑在播放回调
+/// （音频线程）里，所以这里只做一次 fold 和一个原子写，不分配、不打日志、不锁。
+pub struct MeteredSource {
+    inner: PcmReceiver,
+    peak_bits: Arc<AtomicU32>,
+}
+
+impl MeteredSource {
+    /// 包一层，返回音源本身和读电平的把手。
+    #[must_use]
+    pub fn new(inner: PcmReceiver) -> (Self, LevelMeter) {
+        let peak_bits = Arc::new(AtomicU32::new(0));
+        (
+            Self {
+                inner,
+                peak_bits: Arc::clone(&peak_bits),
+            },
+            LevelMeter { peak_bits },
+        )
+    }
+}
+
+impl TrackSource for MeteredSource {
+    fn pull_frame(&mut self, out: &mut Frame) -> bool {
+        let has_data = self.inner.pull_frame(out);
+        // 非负 f32 的位模式与数值同序，所以「按位取最大」等价于「按值取最大」。
+        let peak = out
+            .iter()
+            .fold(0.0_f32, |acc, sample| acc.max(sample.abs()));
+        self.peak_bits.fetch_max(peak.to_bits(), Ordering::Relaxed);
+        has_data
+    }
+}
+
+/// 读电平的把手：`take()` 返回「上次读以来」的峰值，并清零。
+///
+/// 这个语义正好对上界面的 20 Hz 推送：每次推送读一次，读到的是这 50 ms 内最响的那一帧，
+/// 不需要自己算衰减，也不会漏掉一帧。
+#[derive(Debug, Clone)]
+pub struct LevelMeter {
+    peak_bits: Arc<AtomicU32>,
+}
+
+impl LevelMeter {
+    /// 取走上次读以来的峰值（0–1）。
+    #[must_use]
+    pub fn take(&self) -> f32 {
+        f32::from_bits(self.peak_bits.swap(0, Ordering::Relaxed))
     }
 }
 
@@ -305,7 +361,9 @@ pub fn devices() -> Result<String, String> {
     Ok(text)
 }
 
-fn describe_rates(ranges: &[RateRange]) -> String {
+/// 把采样率区间压成人能读的一句话（设备清单与设置页共用）。
+#[must_use]
+pub fn describe_rates(ranges: &[RateRange]) -> String {
     if ranges.is_empty() {
         return "采样率：读不出来".to_owned();
     }

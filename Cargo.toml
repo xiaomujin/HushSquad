@@ -5,6 +5,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*"]   # apps/loopback 是 P2 的临时二进制，P6 前一直在用
+# apps/app 是**独立的 workspace**（自己的 Cargo.toml 里有 [workspace] 表）。
+# 不 exclude 的话，上面的 apps/* 会把它扫进来，cargo 直接报
+# 「multiple workspace roots found in the same workspace」。
+# 为什么独立：Tauri 的依赖树 + WebView2/webkit2gtk 系统库不该绑架音频门禁，
+# 见 docs/ADR/ADR-0014-桌面外壳与门禁的边界.md。
+exclude = ["apps/app"]
 
 [workspace.package]
 version = "0.0.0"             # 未发布，0.0.0 表示骨架阶段
