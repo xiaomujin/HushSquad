@@ -28,6 +28,8 @@ pub fn run() {
             ipc::join_channel,
             ipc::set_self,
             ipc::set_user,
+            ipc::set_voice,
+            ipc::set_ptt,
             ipc::forget_trust,
             ipc::list_devices,
             ipc::selftest,

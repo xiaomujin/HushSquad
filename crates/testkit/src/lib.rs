@@ -9,6 +9,7 @@
 pub mod alloc;
 pub mod baseline;
 pub mod drift;
+pub mod gate;
 pub mod lossmatrix;
 pub mod model;
 pub mod netsim;

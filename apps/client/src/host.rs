@@ -20,6 +20,9 @@
 
 use std::collections::BTreeMap;
 
+// 转出去：外壳（`apps/app`）要按名字构造 `Command::SetVoice`，不该为了一个枚举
+// 再往依赖表里加 `audio-core`。说话方式的定义只有 `audio_core::gate` 一处。
+pub use audio_core::VoiceMode;
 use serde::Serialize;
 
 /// 会话阶段。与 `ui/src/lib/ipc.ts` 的 `Phase` 一一对应。
@@ -116,6 +119,11 @@ pub struct MetersView {
     pub self_level: f32,
     /// 上一段（50 ms）里发过语音包。
     pub tx: bool,
+    /// 上行门控现在开着（这一帧会发）。`tx == false && gate == true` 说明包发不出去，
+    /// 不是「你在静音」——界面要靠这两个字段区分「没在说」和「说了但没发出去」。
+    pub gate: bool,
+    /// 处理链给的 VAD 概率（0–1；`1.0` 表示这条链不提供 VAD）。设置页的灵敏度就靠它。
+    pub vad: f32,
     /// 累计发出的语音包数。
     pub frames_sent: u64,
     /// 上行处理链的算法延迟（ms）。
@@ -159,6 +167,17 @@ pub enum Command {
     SetMute(bool),
     /// 自己闭听 / 取消。
     SetDeafen(bool),
+    /// 换说话方式与门限（`threshold_db` 是 dBFS 的整数，界面滑块给的就是整数）。
+    SetVoice {
+        /// 语音激活 / 按住说话 / 常开。
+        mode: VoiceMode,
+        /// 能量门限（dBFS）。
+        threshold_db: i16,
+        /// 开门时补发几帧。
+        preroll_frames: u32,
+    },
+    /// 按住 / 松开「强制发送」（键盘 Space）。
+    SetPtt(bool),
     /// 调某个人的本机音量 / 静音 / 独听。
     SetUser {
         /// 账号 id。

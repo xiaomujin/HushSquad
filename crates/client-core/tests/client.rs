@@ -245,9 +245,13 @@ fn silence_and_probe_are_recognised() {
     let mut buf = vec![0u8; 64];
     let n = seal::seal_packet(&c.keys().s2c, header, &[], &mut buf).unwrap();
     let mut one = buf[..n].to_vec();
+    // 静音标记带着它占用的序号：接收端靠它把序号空洞推过去而不计丢包。
     assert!(matches!(
         c.receive(&mut one),
-        Ok(Incoming::Silence { sender_id: 88 })
+        Ok(Incoming::Silence {
+            sender_id: 88,
+            seq: 1
+        })
     ));
 
     let header = VoiceHeader {

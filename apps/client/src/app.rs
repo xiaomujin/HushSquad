@@ -16,13 +16,14 @@
 //! 3. **计数不许静默**：丢包、重放、解不开、环满、饿死、混音欠载，全部进统计行。
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use audio_core::AudioCodec;
 use audio_core::receive::{IncomingPacket, PcmReceiver, ReceivePath};
+use audio_core::{AudioCodec, GateConfig, TxGate};
 use client_core::{Client, ClientAction, ClientState, Incoming};
 use protocol::ControlMessage;
 use protocol::encode_frame;
@@ -48,6 +49,20 @@ const RTT_WINDOW: usize = 512;
 const DTX_QUIET_FRAMES: u32 = 30;
 /// 静音门限（约 −70 dBFS）。
 const SILENCE_PEAK: f32 = 3.2e-4;
+/// 门关着的时候，每隔这么多帧补一个「我还活着」的静音标记（200 ms）。
+///
+/// 不发它的话，对方的抖动缓冲会把这段静默数成几百个丢包——界面上那个「丢包」
+/// 数字立刻变成假数。200 ms 一个标记约 1.6 kbps，同时顺手保住了 NAT 映射。
+const KEEPALIVE_FRAMES: u32 = 20;
+/// 预缓冲最多攒几帧（上限，防止界面传进来一个离谱的值）。
+///
+/// 上限是 10 帧（100 ms）而不是「越多越好」：补发是**一次性突发**，全部挤进对方
+/// 抖动缓冲的一瞬间。缓冲的目标延迟是 20 ms、上限 60 ms（`--jitter-min/max`），
+/// 突发的上限必须落在「上限减去稳态深度」这点余量里，否则对方会把补发的音频裁掉，
+/// 等于白补。默认 3 帧（30 ms）是实测能塞进去的最大值。
+const PREROLL_MAX: usize = 10;
+/// 一个 tick 最多取几帧上行（吸收设备时钟与定时器的差）。
+const MAX_FRAMES_PER_TICK: usize = 2;
 /// 每个说话人的入站包环深度。
 const PACKET_RING: usize = 64;
 /// 每个说话人的 PCM 环深度（帧）。它直接等于接收侧的额外延迟。
@@ -55,8 +70,6 @@ const PCM_FRAMES: usize = 4;
 const CONTROL_BUF: usize = 8 * 1024;
 const VOICE_BUF: usize = 1500;
 const OUT_BUF: usize = protocol::MAX_ON_WIRE;
-/// 一个 tick 最多取几帧上行（吸收设备时钟与定时器的差）。
-const MAX_FRAMES_PER_TICK: usize = 2;
 /// 多久做一次成员/轨的清理。
 const GC_INTERVAL: Duration = Duration::from_secs(5);
 /// 控制面心跳间隔。
@@ -139,10 +152,13 @@ enum Source {
 }
 
 impl Source {
-    fn pull(&mut self) -> Option<audio_core::Frame> {
+    /// 取一帧，连同它的 VAD 概率（`1.0` = 这个音源没有判据）。
+    fn pull(&mut self) -> Option<(audio_core::Frame, f32)> {
         match self {
             Self::Capture(capture) => capture.pull(),
-            Self::Tone { tone, .. } => Some(tone.pull()),
+            // 合成音源没有 VAD：报 1.0（「没有意见」），门控只剩能量判据。
+            // 这对测试是对的——正弦音就是「一直在说」。
+            Self::Tone { tone, .. } => Some((tone.pull(), 1.0)),
         }
     }
 
@@ -150,6 +166,101 @@ impl Source {
         match self {
             Self::Capture(capture) => capture.encode(frame, out),
             Self::Tone { codec, .. } => codec.encode(frame, out),
+        }
+    }
+}
+
+/// 上行发送的记账本与缓冲。
+///
+/// 编码器缓冲、包缓冲、七个计数器放在一起，是为了让 [`App::send_voice`] 能**只借
+/// 几个字段**：上行路径里 `source` 已经被借走了，再借整个 `self` 编译器不让。
+struct TxPath {
+    opus: [u8; audio_core::MAX_PACKET_BYTES],
+    packet: [u8; OUT_BUF],
+    /// 发出的语音包数。
+    frames_out: u64,
+    /// 发出的字节数。
+    bytes_out: u64,
+    /// 发送失败次数。
+    send_errors: u64,
+    /// 这一段里真的发出去过。
+    since_emit: bool,
+    /// 被门控拦下（没发）的帧数。
+    gated: u64,
+    /// 补发预缓冲的次数。
+    preroll_flushes: u64,
+    /// 门关着时发出去的保活标记数。
+    keepalives: u64,
+}
+
+impl Default for TxPath {
+    fn default() -> Self {
+        Self {
+            opus: [0; audio_core::MAX_PACKET_BYTES],
+            packet: [0; OUT_BUF],
+            frames_out: 0,
+            bytes_out: 0,
+            send_errors: 0,
+            since_emit: false,
+            gated: 0,
+            preroll_flushes: 0,
+            keepalives: 0,
+        }
+    }
+}
+
+impl TxPath {
+    /// 编码 + 加密 + 发一个语音包。
+    fn voice(
+        &mut self,
+        client: &mut Client,
+        source: &mut Source,
+        frame: &audio_core::Frame,
+        udp: &UdpSocket,
+    ) {
+        let len = source.encode(frame, &mut self.opus);
+        if len == 0 {
+            return;
+        }
+        match client.encode_voice(&self.opus[..len], &mut self.packet) {
+            Ok(n) => {
+                let sent = self.frames_out;
+                transmit(
+                    udp,
+                    &self.packet[..n],
+                    &mut self.frames_out,
+                    &mut self.bytes_out,
+                    &mut self.send_errors,
+                );
+                // 只有真的发出去了才算「上行在发」；发失败要能从界面上看出来。
+                if self.frames_out > sent {
+                    self.since_emit = true;
+                }
+            }
+            Err(e) => {
+                self.send_errors += 1;
+                eprintln!("加密语音失败：{e}");
+            }
+        }
+    }
+
+    /// 发一个静音标记（门关着时的保活）。
+    ///
+    /// 它**占用一个语音序号**——正是要占：接收端按序号空洞数丢包，不占的话这段静默
+    /// 会变成几百个「丢包」。占了之后，接收端就能用 [`audio_core::receive::ReceivePath::note_keepalive`]
+    /// 把空洞推过去而不记账（对方的丢包率实测为 0）。
+    ///
+    /// 顺带两件事：UDP 的 NAT 映射不会在静默期过期；漂移前馈看到的是「20 个包过去了」，
+    /// 于是门控一开一关不会把发包节奏的估计搅乱。
+    fn silence(&mut self, client: &mut Client, udp: &UdpSocket) {
+        if let Ok(n) = client.encode_silence(&mut self.packet) {
+            transmit(
+                udp,
+                &self.packet[..n],
+                &mut self.frames_out,
+                &mut self.bytes_out,
+                &mut self.send_errors,
+            );
         }
     }
 }
@@ -215,6 +326,14 @@ pub struct Summary {
     pub tick_hz: f64,
     /// 发出去的打点包数。
     pub probes_sent: u64,
+    /// 上行门控用的是哪种说话方式。
+    pub voice: audio_core::VoiceMode,
+    /// 被门控拦下（没发出去）的帧数。`voice = open` 时恒为 0。
+    pub gated_frames: u64,
+    /// 开门时补发预缓冲的次数。
+    pub preroll_flushes: u64,
+    /// 门关着时发出去的静默保活标记数。
+    pub keepalives: u64,
 }
 
 /// 客户端状态。
@@ -242,8 +361,16 @@ pub struct App<'a> {
     last_net_emit: Instant,
     /// 自上次推送以来的上行峰值。
     self_level: f32,
-    /// 这一段里发过语音包。
-    tx_since_emit: bool,
+    /// 上行的编码、发送与记账。
+    tx: TxPath,
+    /// 上行门控（语音激活 / 按住说话 / 常开）。
+    gate: TxGate,
+    /// 开门前攒下的、还没发出去的帧（预缓冲）。
+    preroll: VecDeque<audio_core::Frame>,
+    /// 预缓冲最多攒几帧。
+    preroll_limit: usize,
+    /// 门关着连续多少帧了（保活标记的节拍器）。
+    gate_quiet: u32,
     /// 上行处理链的算法延迟（毫秒）。
     chain_ms: f32,
     /// 等服务器确认的频道（`None` 表示没有正在进行的切换）。
@@ -253,11 +380,8 @@ pub struct App<'a> {
     peers: BTreeMap<u32, Peer>,
     /// sender_id → 最后一次听到他语音的时刻（毫秒）。
     last_voice: BTreeMap<u32, u64>,
-    frames_out: u64,
-    bytes_out: u64,
     frames_in: u64,
     bytes_in: u64,
-    send_errors: u64,
     recv_errors: u64,
     /// 发出去的打点包数（它们各占用一个语音序号，接收端会算成丢包）。
     probes_sent: u64,
@@ -521,6 +645,14 @@ async fn run_inner(cfg: Config, host: Option<&dyn Host>) -> Result<Summary, Stri
         Some(Source::Capture(capture)) => capture.chain_latency_ms(),
         _ => 0.0,
     };
+    let gate = TxGate::new(GateConfig {
+        mode: cfg.voice,
+        threshold_db: cfg.vad_threshold_db,
+        ..GateConfig::default()
+    });
+    let preroll_limit = usize::try_from(cfg.preroll_frames)
+        .unwrap_or(PREROLL_MAX)
+        .min(PREROLL_MAX);
     let mut app = App {
         cfg,
         client,
@@ -536,17 +668,18 @@ async fn run_inner(cfg: Config, host: Option<&dyn Host>) -> Result<Summary, Stri
         last_state: None,
         last_net_emit: Instant::now(),
         self_level: 0.0,
-        tx_since_emit: false,
+        tx: TxPath::default(),
+        gate,
+        preroll: VecDeque::with_capacity(preroll_limit),
+        preroll_limit,
+        gate_quiet: 0,
         chain_ms,
         pending_join: None,
         quit: false,
         peers: BTreeMap::new(),
         last_voice: BTreeMap::new(),
-        frames_out: 0,
-        bytes_out: 0,
         frames_in: 0,
         bytes_in: 0,
-        send_errors: 0,
         recv_errors: 0,
         probes_sent: 0,
         dtx_quiet: 0,
@@ -704,13 +837,31 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// 上行：取至多两帧 → 处理链 → Opus → 语音面。
+    /// 上行：取至多两帧 → 门控 → 处理链（已在 `pull` 里跑过）→ Opus → 语音面。
+    ///
+    /// 门控在这里，是因为只有这里同时知道三件事：这一帧的电平、处理链给的 VAD 概率、
+    /// 用户选的是哪种说话方式。往前一步（`Capture`）不知道用户的设置，往后一步
+    /// （编码）已经没有「发不发」这个选择了。
     fn send_voice(&mut self, udp: &UdpSocket) {
-        let Some(source) = self.source.as_mut() else {
+        // 分字段借：`source` 要可变借，其余字段各自借，这样不必复制一份计数器出来。
+        let Self {
+            source,
+            client,
+            tx,
+            gate,
+            preroll,
+            preroll_limit,
+            gate_quiet,
+            self_level,
+            muted,
+            cfg,
+            dtx_quiet,
+            dtx_silent,
+            ..
+        } = self;
+        let Some(source) = source.as_mut() else {
             return;
         };
-        let mut packet = [0u8; OUT_BUF];
-        let mut opus = [0u8; audio_core::MAX_PACKET_BYTES];
         let max_frames = match source {
             // 采集环里可能积了不止一帧（设备时钟比定时器快一点），允许一次取两帧追上。
             Source::Capture(_) => MAX_FRAMES_PER_TICK,
@@ -718,85 +869,86 @@ impl<'a> App<'a> {
             Source::Tone { .. } => 1,
         };
         for _ in 0..max_frames {
-            let Some(frame) = source.pull() else {
+            let Some((frame, vad)) = source.pull() else {
                 break;
             };
             let peak = frame.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()));
-            // 电平在**静音之前**取：界面上「麦克风有信号但没在发」正是静音该有的样子。
-            self.self_level = self.self_level.max(peak);
-            if self.muted {
+            // 电平在**门控之前**取：界面上「麦克风有信号但没在发」正是门控该有的样子。
+            *self_level = self_level.max(peak);
+            if *muted {
+                // 静音时清空预缓冲：解静音之后不该听到静音之前的 30 ms。
+                preroll.clear();
+                *gate_quiet = 0;
                 continue;
             }
+
+            let step = gate.step(audio_core::gate::peak_to_db(peak), vad);
+            if !step.send {
+                tx.gated += 1;
+                *gate_quiet += 1;
+                // 门关着：把这一帧攒进预缓冲（开门时补发），并定期发一个保活标记。
+                if *preroll_limit > 0 {
+                    if preroll.len() == *preroll_limit {
+                        preroll.pop_front();
+                    }
+                    preroll.push_back(frame);
+                }
+                if *gate_quiet >= KEEPALIVE_FRAMES {
+                    *gate_quiet = 0;
+                    tx.silence(client, udp);
+                    tx.keepalives += 1;
+                }
+                continue;
+            }
+            *gate_quiet = 0;
+            if step.opened && !preroll.is_empty() {
+                // 补发：先发攒下的（它们比当前帧早），再发当前帧。顺序必须是这样，
+                // 否则对方的抖动缓冲看到的是倒序的序号，会当成重放丢掉。
+                tx.preroll_flushes += 1;
+                while let Some(held) = preroll.pop_front() {
+                    tx.voice(client, source, &held, udp);
+                }
+            }
+            // 门开着的时候不攒（上面只在门关着时 push），所以这里不需要再清。
 
             // DTX：安静够久就停发，只在边界发一个静音标记。默认关闭 ——
             // 一直发也有好处（NAT 保活、抖动统计连续），要不要省流量由用户决定。
-            if self.cfg.dtx {
+            // 语音激活模式下这段基本走不到（门早就关了），留着是为了 `--voice open --dtx`。
+            if cfg.dtx {
                 if peak < SILENCE_PEAK {
-                    self.dtx_quiet += 1;
-                    if self.dtx_quiet >= DTX_QUIET_FRAMES && !self.dtx_silent {
-                        self.dtx_silent = true;
-                        if let Ok(n) = self.client.encode_silence(&mut packet) {
-                            transmit(
-                                udp,
-                                &packet[..n],
-                                &mut self.frames_out,
-                                &mut self.bytes_out,
-                                &mut self.send_errors,
-                            );
-                        }
+                    *dtx_quiet += 1;
+                    if *dtx_quiet >= DTX_QUIET_FRAMES && !*dtx_silent {
+                        *dtx_silent = true;
+                        tx.silence(client, udp);
                     }
                     continue;
                 }
-                self.dtx_quiet = 0;
-                self.dtx_silent = false;
+                *dtx_quiet = 0;
+                *dtx_silent = false;
             }
 
             // 合成音也走 Opus：否则测的就不是真实链路。
-            let len = source.encode(&frame, &mut opus);
-            if len == 0 {
-                continue;
-            }
-            match self.client.encode_voice(&opus[..len], &mut packet) {
-                Ok(n) => {
-                    let sent = self.frames_out;
-                    transmit(
-                        udp,
-                        &packet[..n],
-                        &mut self.frames_out,
-                        &mut self.bytes_out,
-                        &mut self.send_errors,
-                    );
-                    // 只有真的发出去了才算「上行在发」；发失败要能从界面上看出来。
-                    if self.frames_out > sent {
-                        self.tx_since_emit = true;
-                    }
-                }
-                Err(e) => {
-                    self.send_errors += 1;
-                    eprintln!("加密语音失败：{e}");
-                }
-            }
+            tx.voice(client, source, &frame, udp);
         }
     }
 
     /// 打点：测的是**语音面**的往返，而不是控制面的。
     fn send_probe(&mut self, udp: &UdpSocket) {
-        let mut packet = [0u8; OUT_BUF];
-        match self.client.encode_probe(now_us(), &mut packet) {
+        match self.client.encode_probe(now_us(), &mut self.tx.packet) {
             Ok(n) => {
                 // 打点包也占一个语音序号（nonce 的唯一性靠这一个计数器），
                 // 所以接收端会把它算成 1 个空洞丢包 —— 报告里要把这笔账说清楚。
                 self.probes_sent += 1;
                 transmit(
                     udp,
-                    &packet[..n],
-                    &mut self.frames_out,
-                    &mut self.bytes_out,
-                    &mut self.send_errors,
+                    &self.tx.packet[..n],
+                    &mut self.tx.frames_out,
+                    &mut self.tx.bytes_out,
+                    &mut self.tx.send_errors,
                 );
             }
             Err(e) => {
-                self.send_errors += 1;
+                self.tx.send_errors += 1;
                 eprintln!("加密打点包失败：{e}");
             }
         }
@@ -845,7 +997,12 @@ impl<'a> App<'a> {
                 let packet = IncomingPacket::new(sender_id, seq as u16, timestamp, payload);
                 self.route(sender_id, packet);
             }
-            Ok(Incoming::Silence { sender_id }) => {
+            Ok(Incoming::Silence { sender_id, seq }) => {
+                // 保活标记：把序号推过去但不计丢包。没有这一步，语音激活下对方的每一段
+                // 静默都会被数成几十个丢包（见 `ReceivePath::note_keepalive`）。
+                if let Some(peer) = self.peers.get_mut(&sender_id) {
+                    peer.path.note_keepalive(seq as u16);
+                }
                 self.last_voice.remove(&sender_id);
             }
             Ok(Incoming::BindAck { server_time_ms, .. }) => {
@@ -978,6 +1135,13 @@ impl<'a> App<'a> {
             match command {
                 Command::SetMute(muted) => {
                     self.muted = muted;
+                    // 静音时把预缓冲丢掉、门先关上：解静音之后要重新判，
+                    // 不能带着静音前的 30 ms 一起发出去。
+                    self.preroll.clear();
+                    if muted {
+                        self.gate.reset();
+                        self.gate_quiet = 0;
+                    }
                     self.dirty = true;
                 }
                 Command::SetDeafen(deafened) => {
@@ -985,6 +1149,23 @@ impl<'a> App<'a> {
                     self.sync_mixer();
                     self.dirty = true;
                 }
+                Command::SetVoice {
+                    mode,
+                    threshold_db,
+                    preroll_frames,
+                } => {
+                    self.gate.set_mode(mode);
+                    self.gate.set_threshold_db(f32::from(threshold_db));
+                    self.preroll_limit = usize::try_from(preroll_frames)
+                        .unwrap_or(PREROLL_MAX)
+                        .min(PREROLL_MAX);
+                    while self.preroll.len() > self.preroll_limit {
+                        self.preroll.pop_front();
+                    }
+                    self.gate_quiet = 0;
+                    self.dirty = true;
+                }
+                Command::SetPtt(held) => self.gate.set_ptt(held),
                 Command::SetUser {
                     user_id,
                     volume,
@@ -1052,7 +1233,7 @@ impl<'a> App<'a> {
     fn publish_meters(&mut self) {
         // 先把要清零的量取出来，再借 `host`（否则 `&mut self` 与 `&self.host` 打架）。
         let self_level = std::mem::take(&mut self.self_level);
-        let tx = std::mem::take(&mut self.tx_since_emit);
+        let tx = std::mem::take(&mut self.tx.since_emit);
         let Some(host) = self.host else {
             return;
         };
@@ -1089,7 +1270,9 @@ impl<'a> App<'a> {
             talking,
             self_level,
             tx,
-            frames_sent: self.frames_out,
+            gate: self.gate.is_open(),
+            vad: self.gate.vad(),
+            frames_sent: self.tx.frames_out,
             chain_ms: self.chain_ms,
             levels,
         });
@@ -1137,7 +1320,7 @@ impl<'a> App<'a> {
             rtt_p50_ms: to_ms(percentile(&self.rtt_us, 0.5)),
             rtt_p95_ms: to_ms(percentile(&self.rtt_us, 0.95)),
             underruns,
-            kbps: (self.bytes_out as f64 * 8.0 / 1000.0 / seconds) as f32,
+            kbps: (self.tx.bytes_out as f64 * 8.0 / 1000.0 / seconds) as f32,
             tick_hz: (self.ticks as f64 / seconds) as f32,
         });
     }
@@ -1202,10 +1385,10 @@ impl<'a> App<'a> {
         format!(
             "[stats] t={}s out={}f/{}B in={}f/{}B lost={lost} jitter={jitter}ms \
              target={target}ms slip={slip} pacing={} mix_under={mix_under} \
-             clip={mix_clipped} peak={mix_peak:.3} rtt={} speaking={}",
+             clip={mix_clipped} peak={mix_peak:.3} rtt={} speaking={} gate={}/{} gated={}",
             self.started.elapsed().as_secs(),
-            self.frames_out,
-            self.bytes_out,
+            self.tx.frames_out,
+            self.tx.bytes_out,
             self.frames_in,
             self.bytes_in,
             if settled {
@@ -1215,6 +1398,9 @@ impl<'a> App<'a> {
             },
             self.describe_rtt(),
             self.speaking(),
+            if self.gate.is_open() { "open" } else { "shut" },
+            self.cfg.voice.as_str(),
+            self.tx.gated,
         )
     }
 
@@ -1282,12 +1468,12 @@ impl<'a> App<'a> {
             });
         Summary {
             seconds: self.started.elapsed().as_secs_f64(),
-            frames_out: self.frames_out,
-            bytes_out: self.bytes_out,
+            frames_out: self.tx.frames_out,
+            bytes_out: self.tx.bytes_out,
             frames_in: self.frames_in,
             bytes_in: self.bytes_in,
             recv_errors: self.recv_errors,
-            send_errors: self.send_errors,
+            send_errors: self.tx.send_errors,
             packets_lost: peers.iter().map(|peer| peer.packets_lost).sum(),
             rtt_p50_us: percentile(&self.rtt_us, 0.5),
             rtt_p95_us: percentile(&self.rtt_us, 0.95),
@@ -1299,6 +1485,10 @@ impl<'a> App<'a> {
             mix_underruns,
             mix_peak,
             probes_sent: self.probes_sent,
+            voice: self.cfg.voice,
+            gated_frames: self.tx.gated,
+            preroll_flushes: self.tx.preroll_flushes,
+            keepalives: self.tx.keepalives,
             tick_hz: {
                 let seconds = self.started.elapsed().as_secs_f64();
                 if seconds > 0.0 {
@@ -1317,12 +1507,19 @@ impl<'a> App<'a> {
         println!(
             "时长 {:.1} s；上行 {} 帧 / {:.1} kB / {:.1} kbps；下行 {} 帧 / {:.1} kB / {:.1} kbps",
             seconds,
-            self.frames_out,
-            self.bytes_out as f64 / 1000.0,
-            self.bytes_out as f64 * 8.0 / 1000.0 / seconds,
+            self.tx.frames_out,
+            self.tx.bytes_out as f64 / 1000.0,
+            self.tx.bytes_out as f64 * 8.0 / 1000.0 / seconds,
             self.frames_in,
             self.bytes_in as f64 / 1000.0,
             self.bytes_in as f64 * 8.0 / 1000.0 / seconds,
+        );
+        println!(
+            "上行门控 {}：拦下 {} 帧，补发预缓冲 {} 次，静默保活 {} 个",
+            self.cfg.voice.as_str(),
+            self.tx.gated,
+            self.tx.preroll_flushes,
+            self.tx.keepalives,
         );
         println!(
             "收发节奏 {:.1} Hz（10 ms 节奏应当接近 100）；迟到 {} 次，最长 {} ms",
@@ -1339,7 +1536,7 @@ impl<'a> App<'a> {
                 .sum::<u64>(),
             self.probes_sent,
             self.recv_errors,
-            self.send_errors,
+            self.tx.send_errors,
         );
         if self.rtt_us.is_empty() {
             println!("语音面 RTT：没有样本（--probe-interval 0？）");

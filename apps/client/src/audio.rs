@@ -197,7 +197,11 @@ impl Capture {
     }
 
     /// 取一整帧并跑处理链；环里不足一帧时返回 `None`（记一次饿死）。
-    pub fn pull(&mut self) -> Option<Frame> {
+    ///
+    /// 返回值里带上处理链给的 VAD 概率 —— 上行的门控（`audio_core::TxGate`）靠它
+    /// 区分「说话」和「风扇」。`1.0` 表示这条链不提供 VAD（见 `Stage::process`），
+    /// 那时门控退化成只看能量，不是「一直发」。
+    pub fn pull(&mut self) -> Option<(Frame, f32)> {
         if self.ring.slots() < FRAME_SAMPLES {
             self.starved += 1;
             return None;
@@ -212,10 +216,11 @@ impl Capture {
                 }
             }
         }
-        // 处理链的返回值是 VAD 概率，v1 不用它做门限（DTX 走峰值判定，见 app.rs）。
-        let _vad = self.chain.process(&mut frame);
+        // 处理链的返回值是这一帧的 VAD 概率。以前这里把它丢掉（DTX 走峰值判定），
+        // 现在它是语音激活的门控判据：丢在这里就等于没有门控。
+        let vad = self.chain.process(&mut frame);
         self.frames += 1;
-        Some(frame)
+        Some((frame, vad))
     }
 
     /// 编码一帧，返回写入 `out` 的字节数（0 = 编码失败）。

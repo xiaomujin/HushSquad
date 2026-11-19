@@ -49,6 +49,15 @@ export interface Meters {
   talking: boolean;
   self_level: number;
   tx: boolean;
+  /**
+   * 上行门控现在开着（这一帧会发）。
+   *
+   * `tx === false && gate === true` 是「包没发出去」，不是「你在静音」——
+   * 界面必须靠这两个字段区分「没在说」和「说了但发不出去」。
+   */
+  gate?: boolean;
+  /** 处理链给的 VAD 概率 0–1（`1` 表示这条链不提供 VAD）。设置页的灵敏度条靠它。 */
+  vad?: number;
   frames_sent: number;
   /** 上行处理链的算法延迟（ms）。 */
   chain_ms: number;
@@ -86,8 +95,17 @@ export interface ConnectRequest {
   addr: string;
   identity: { kind: 'anonymous' } | { kind: 'account'; user: string; password: string };
   trust: { kind: 'remember'; fingerprint: string } | { kind: 'reject' };
+  /** 上行语音设置。跟着连接一起下去，界面一进来就是语音激活。 */
+  voice: VoiceSettings;
 }
 
+/**
+ * 上行语音设置。
+ *
+ * `preroll_frames` 是**开门时补发**的帧数（1 帧 = 10 ms）。它不是「越多越好」：
+ * 补发是一次性突发，全部挤进对方抖动缓冲的一瞬间，超过缓冲余量就会被裁掉。
+ * 上限 10 帧，默认 3 帧（30 ms）—— 见 ADR-0015。
+ */
 export interface VoiceSettings {
   mode: 'vad' | 'ptt' | 'open';
   threshold_db: number;
@@ -108,6 +126,12 @@ export interface Backend {
   disconnect(): Promise<void>;
   joinChannel(channelId: number): Promise<void>;
   setVoice(settings: VoiceSettings): Promise<void>;
+  /**
+   * 按住 / 松开「强制发送」（Space）。
+   *
+   * 三种说话方式下按住都强制发送——这是设置页里给用户的承诺。
+   */
+  setPtt(held: boolean): Promise<void>;
   setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void>;
   setUser(userId: number, patch: { volume?: number; mute?: boolean; solo?: boolean }): Promise<void>;
   setView(view: View): Promise<void>;
@@ -160,9 +184,11 @@ export class MockBackend implements Backend {
   #handlers: Handlers | null = null;
   #members: Member[] = [];
   #levels: Record<number, number> = {};
-  #meters: Meters = { talking: false, self_level: 0, tx: false, frames_sent: 0, chain_ms: 10, levels: {} };
+  #meters: Meters = { talking: false, self_level: 0, tx: false, gate: false, vad: 0, frames_sent: 0, chain_ms: 10, levels: {} };
   #frames = 0;
   #timers: ReturnType<typeof setInterval>[] = [];
+  #voice: VoiceSettings = { mode: 'vad', threshold_db: -38, preroll_frames: 3 };
+  #ptt = false;
   // 单独存一份：`Net.budget` / `Net.device` 是可选字段，展开前得有个确定的类型。
   #budget = { capture: 0, chain: 0.08, encode: 0.14, network: 0.3, jitter: 14, playout: 8 };
   #device = { digital_loopback_ms: 34.3, acoustic_loopback_ms: 175.3 };
@@ -181,7 +207,8 @@ export class MockBackend implements Backend {
     device: this.#device,
   };
 
-  async connect(_req: ConnectRequest): Promise<void> {
+  async connect(req: ConnectRequest): Promise<void> {
+    this.#voice = req.voice;
     this.#handlers?.onPhase('authenticating');
     await sleep(280);
     this.#members = [
@@ -211,7 +238,13 @@ export class MockBackend implements Backend {
     this.#handlers?.onMembers(this.#members, SELF);
   }
 
-  async setVoice(_settings: VoiceSettings): Promise<void> {}
+  async setVoice(settings: VoiceSettings): Promise<void> {
+    this.#voice = settings;
+  }
+
+  async setPtt(held: boolean): Promise<void> {
+    this.#ptt = held;
+  }
 
   async setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void> {
     for (const m of this.#members) if (m.user_id === SELF && state.mute !== undefined) m.mute = state.mute;
@@ -253,11 +286,20 @@ export class MockBackend implements Backend {
         this.#levels[3] = 0;
         const self = 0.18 + 0.1 * Math.abs(Math.sin(t * 1.7));
         this.#levels[SELF] = self;
+        // 假的 VAD：把电平映射成 0–1，让设置页的灵敏度条在浏览器里也会动。
+        // 它不模拟音质，只模拟**契约**——门控的判据和真后端是同一套。
+        const vad = Math.min(1, self * 2.4);
+        const loud = 20 * Math.log10(Math.max(self, 1e-6));
+        const gate =
+          this.#voice.mode === 'open' ||
+          (this.#voice.mode === 'ptt' ? this.#ptt : this.#ptt || (vad >= 0.5 && loud >= this.#voice.threshold_db));
         this.#meters = {
           ...this.#meters,
           self_level: self,
           talking: kai,
-          tx: self > 0.25,
+          vad,
+          gate,
+          tx: gate,
           levels: this.#levels,
         };
         if (this.#meters.tx) this.#frames += 1;

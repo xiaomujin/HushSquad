@@ -12,14 +12,14 @@
 //! | `connect` / `disconnect` / `join_channel` | 真的（跑真客户端） |
 //! | `set_self`（静音 / 闭听） | 真的（改混音器与上行） |
 //! | `set_user`（音量 / 静音 / 独听） | 真的（改本地混音器那一路） |
+//! | `set_voice`（语音激活 / 按住说话 / 常开） | 真的（上行门控，`audio_core::TxGate`） |
+//! | `set_ptt`（按住 Space 强制发送） | 真的（同上） |
 //! | `list_devices` | 真的（cpal 枚举 + 采样率区间） |
 //! | `selftest` | **还没有**：返回一条明确的错误，不假装在测 |
-//!
-//! `setVoice`（语音激活 / PTT / 常开）目前**没有**对应命令：上行还没有 VAD 门控，
-//! 麦克风一直在发。这件事写进了 `docs/UI设计-v0.1.md` 的缺口表，不在界面里装样子。
 
 use std::sync::{Arc, Mutex};
 
+use hushsquad_client::VoiceMode;
 use hushsquad_client::config::Config;
 use hushsquad_client::host::Command;
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,41 @@ pub struct ConnectRequest {
     pub addr: String,
     /// 身份。
     pub identity: Identity,
+    /// 上行语音设置。界面一进来就是「语音激活」，所以这个值要跟着连接一起
+    /// 下去——不能等用户去设置页点一下才开始门控。
+    pub voice: Option<VoiceSettings>,
+}
+
+/// 上行语音设置。字段名与 `ui/src/lib/ipc.ts` 的 `VoiceSettings` 一致。
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceSettings {
+    /// `vad` / `ptt` / `open`。
+    pub mode: String,
+    /// 能量门限（dBFS）。界面滑块给的是整数，这里仍按浮点收，免得 -37.5 直接反序列化失败。
+    pub threshold_db: f32,
+    /// 开门时补发几帧。
+    pub preroll_frames: u32,
+}
+
+impl VoiceSettings {
+    /// 变成一条会话指令。名字不认识就报错，不静默退回默认值——
+    /// 静默退回会让界面上选的东西与实际行为不一致，那种 bug 最难查。
+    fn into_command(self) -> Result<Command, String> {
+        Ok(Command::SetVoice {
+            mode: VoiceMode::parse(&self.mode)?,
+            // 限幅到门控有意义的一小段，避免界面传进来一个 +20 或 -200。
+            threshold_db: self.threshold_db.clamp(-90.0, 0.0).round() as i16,
+            preroll_frames: self.preroll_frames.min(10),
+        })
+    }
+
+    /// 应用到客户端配置（连接前就要生效的那一份）。
+    fn apply(self, cfg: &mut Config) -> Result<(), String> {
+        cfg.voice = VoiceMode::parse(&self.mode)?;
+        cfg.vad_threshold_db = self.threshold_db.clamp(-90.0, 0.0);
+        cfg.preroll_frames = self.preroll_frames.min(10);
+        Ok(())
+    }
 }
 
 /// 身份。
@@ -94,8 +129,13 @@ impl ConnectRequest {
             quiet: true,
             stats_interval: None,
             probe_interval: Some(std::time::Duration::from_secs(5)),
+            // 产品默认是语音激活（命令行默认常开，见 config.rs 的说明）。
+            voice: VoiceMode::Vad,
             ..Config::default()
         };
+        if let Some(voice) = self.voice {
+            voice.apply(&mut cfg)?;
+        }
         cfg.server = addr;
         match self.identity {
             Identity::Anonymous => cfg.anonymous = true,
@@ -189,6 +229,29 @@ pub fn set_user(
         mute,
         solo,
     })
+}
+
+/// 换说话方式与门限。
+#[tauri::command]
+pub fn set_voice(
+    state: State<'_, AppState>,
+    mode: String,
+    threshold_db: f32,
+    preroll_frames: u32,
+) -> Result<(), String> {
+    let command = VoiceSettings {
+        mode,
+        threshold_db,
+        preroll_frames,
+    }
+    .into_command()?;
+    state.send(command)
+}
+
+/// 按住 / 松开「强制发送」。任何模式下按住都会发（设置页里那句 Space 的承诺）。
+#[tauri::command]
+pub fn set_ptt(state: State<'_, AppState>, held: bool) -> Result<(), String> {
+    state.send(Command::SetPtt(held))
 }
 
 // ---------------------------------------------------------------- 信任

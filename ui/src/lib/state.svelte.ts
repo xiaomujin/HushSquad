@@ -10,7 +10,7 @@ class AppState {
   selfUserId = $state(0);
   selfChannel = $state(0);
 
-  meters = $state<Meters>({ talking: false, self_level: 0, tx: false, frames_sent: 0, chain_ms: 10, levels: {} });
+  meters = $state<Meters>({ talking: false, self_level: 0, tx: false, gate: false, vad: 0, frames_sent: 0, chain_ms: 10, levels: {} });
   net = $state<Net | null>(null);
 
   view = $state<View>('grid');
@@ -18,7 +18,9 @@ class AppState {
   selfMute = $state(false);
   deafen = $state(false);
 
-  voice = $state<VoiceSettings>({ mode: 'vad', threshold_db: -38, preroll_frames: 30 });
+  // 3 帧 = 30 ms。再多就要拿延迟换（补发是一次性突发，会挤爆对方的抖动缓冲），
+  // 见 ADR-0015。
+  voice = $state<VoiceSettings>({ mode: 'vad', threshold_db: -38, preroll_frames: 3 });
   chain = $state('highpass,rnn,agc2');
   addr = $state('127.0.0.1:64738');
 

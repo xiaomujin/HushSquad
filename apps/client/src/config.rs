@@ -46,6 +46,9 @@ pub const USAGE: &str = r"HushSquad 客户端
   --no-mic                不开麦克风（只听）
   --no-speaker            不开扬声器（只发）
   --chain <档位串>        上行处理链（默认 highpass,rnn,agc2；none 表示直通）
+  --voice <方式>          上行门控：vad / ptt / open（默认 open，见下）
+  --vad-threshold <dBFS>  语音激活的能量门限（默认 -50）。低于它的帧一律不发
+  --preroll <帧>          开门时补发几帧（默认 3 = 30 ms，0 表示不补）
   --dtx                   静音时不发包（省流量，但对方的抖动缓冲要能撑住）
   --tone <Hz>             用合成正弦音代替麦克风（验证链路用，不需要声卡）
   --jitter-min <毫秒>     抖动缓冲目标延迟下限（默认 20）
@@ -60,6 +63,13 @@ pub const USAGE: &str = r"HushSquad 客户端
   --list-devices          列出音频设备后退出
   --quiet                 只打错误与最终报告
   --help                  打印这段说明
+
+说话方式（--voice）：
+  open   一直发。命令行**默认**这个：脚本与端到端测试都按「每帧一个包」写断言，
+         换默认值会让它们莫名其妙地挂在「没有收到包」上。界面默认是 vad。
+  vad    检测到说话才发，静默时只每 200 ms 发一个保活标记（对方才不会把它算成丢包）。
+         判据是「能量过门限 **且** VAD 概率过线」，链上没有 VAD 时退化成只看能量。
+  ptt    按住才发（键盘 Space）。命令行没有键盘，只能用 --voice ptt 验证「不按不发」。
 
 退出时总会打印一份汇总（含语音面 RTT 的 p50/p95/p99），可直接贴进报告。
 ";
@@ -104,6 +114,12 @@ pub struct Config {
     pub no_speaker: bool,
     /// 上行处理链。
     pub chain: String,
+    /// 上行门控方式。
+    pub voice: audio_core::VoiceMode,
+    /// 语音激活的能量门限（dBFS）。
+    pub vad_threshold_db: f32,
+    /// 开门时补发几帧（0 = 不补）。
+    pub preroll_frames: u32,
     /// 静音时不发包。
     pub dtx: bool,
     /// 用合成正弦音代替麦克风（Hz）。
@@ -148,6 +164,11 @@ impl Default for Config {
             no_mic: false,
             no_speaker: false,
             chain: "highpass,rnn,agc2".to_owned(),
+            // 命令行默认常开：脚本与 e2e 断言的是「每帧一个包」。
+            // 产品默认是语音激活，那个默认值在界面侧（`apps/app` 的 ConnectRequest）。
+            voice: audio_core::VoiceMode::Open,
+            vad_threshold_db: -50.0,
+            preroll_frames: 3,
             dtx: false,
             tone: None,
             jitter_min_ms: 20,
@@ -193,6 +214,17 @@ impl Config {
                 "--no-mic" => config.no_mic = true,
                 "--no-speaker" => config.no_speaker = true,
                 "--chain" => config.chain = value()?,
+                "--voice" => config.voice = audio_core::VoiceMode::parse(&value()?)?,
+                "--vad-threshold" => {
+                    config.vad_threshold_db = value()?
+                        .parse()
+                        .map_err(|_| "--vad-threshold 需要 dBFS（如 -50）".to_owned())?;
+                }
+                "--preroll" => {
+                    config.preroll_frames = value()?
+                        .parse()
+                        .map_err(|_| "--preroll 需要帧数（1 帧 = 10 ms）".to_owned())?;
+                }
                 "--dtx" => config.dtx = true,
                 "--tone" => {
                     config.tone = Some(
@@ -343,5 +375,24 @@ mod tests {
     #[test]
     fn unknown_flags_are_refused() {
         assert!(parse(&["--nope"]).is_err());
+    }
+
+    #[test]
+    fn the_command_line_defaults_to_open_so_scripts_keep_working() {
+        // 命令行的默认值不是产品默认值：脚本与 e2e 断言「每帧一个包」，
+        // 换成语音激活会让它们在「没有收到包」上莫名其妙地挂掉。
+        let config = parse(&[]).unwrap();
+        assert_eq!(config.voice, audio_core::VoiceMode::Open);
+        assert_eq!(config.preroll_frames, 3);
+    }
+
+    #[test]
+    fn voice_mode_and_gate_knobs_are_parsed() {
+        let config =
+            parse(&["--voice", "vad", "--vad-threshold", "-38", "--preroll", "0"]).unwrap();
+        assert_eq!(config.voice, audio_core::VoiceMode::Vad);
+        assert!((config.vad_threshold_db + 38.0).abs() < f32::EPSILON);
+        assert_eq!(config.preroll_frames, 0);
+        assert!(parse(&["--voice", "喊"]).is_err());
     }
 }

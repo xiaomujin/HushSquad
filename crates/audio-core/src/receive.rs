@@ -255,6 +255,22 @@ impl ReceivePath {
     /// 只处理 16 位回绕下的前向空洞：序号往回走（迟到、重复、重排后到）不计丢失——
     /// 那些包 NetEQ 自己会按序号丢弃或重排，我们不该重复记一遍。
     fn note_seq(&mut self, seq: u16) {
+        self.note_seq_inner(seq, true);
+    }
+
+    /// 收到一个「我这边没在说话」的保活标记（对方门控关着时每 200 ms 一个）。
+    ///
+    /// 它占了一个序号但**没有音频**，所以只把 `next_expected` 推过去、不计丢包。
+    /// 不做这件事的话，语音激活会把对方的每一段静默都变成几十个「丢包」，
+    /// 界面上那个数字立刻变成假数——而丢包率是这个项目里最不该说谎的数字。
+    ///
+    /// 漂移前馈照样记这一跳：那 20 个包**确实存在过**，只是没发。这样「发包节奏」
+    /// 的估计不会被门控打乱（否则门控一开一关，pacing 就会抖出几千 ppm）。
+    pub fn note_keepalive(&mut self, seq: u16) {
+        self.note_seq_inner(seq, false);
+    }
+
+    fn note_seq_inner(&mut self, seq: u16, count_loss: bool) {
         // 前向推进量（包）：空洞也算，重复/重排/迟到算 0。这就是漂移前馈的输入——
         // 「一段时间里序号总共走了多少包」对抖动和丢包都免疫（见 `DriftControl::note_seq_advance`）。
         let mut advance = 0_u64;
@@ -267,7 +283,9 @@ impl ReceivePath {
                     self.next_expected = Some(expected.wrapping_add(1));
                 } else if ahead < 0x8000 {
                     advance = u64::from(ahead) + 1;
-                    self.stats.packets_lost += u64::from(ahead);
+                    if count_loss {
+                        self.stats.packets_lost += u64::from(ahead);
+                    }
                     self.next_expected = Some(seq.wrapping_add(1));
                 }
             }
@@ -460,6 +478,32 @@ mod tests {
             samples.iter().any(|s| s.abs() > 0.05),
             "输出全静音——PLC 没跑起来"
         );
+    }
+
+    #[test]
+    fn a_keepalive_bridges_the_gap_without_counting_loss() {
+        // 语音激活：门关着的时候不发音频，只每 200 ms 发一个静音标记（它占一个序号）。
+        // 接收端必须把这段空洞**推过去但不记账**——否则 5 秒静默会变成 500 个「丢包」，
+        // 而丢包率是这个项目里最不该说谎的数字。
+        let (mut tx, mut path, _out) = ReceivePath::new(SENDER, 32, 4).expect("构造接收路径");
+        let mut codec = OpusCodec::with_defaults().expect("构造编码器");
+        let payload = encode(&mut codec, 0);
+        for seq in [0_u16, 1] {
+            let packet = IncomingPacket::new(SENDER, seq, u32::from(seq) * 480, &payload);
+            assert!(tx.send(packet), "入队失败");
+        }
+        path.tick();
+        // 门关了 20 帧：第 21 个包是保活标记，序号直接跳到 21。
+        path.note_keepalive(21);
+        // 之后又开口了。
+        for seq in [22_u16, 23] {
+            let packet = IncomingPacket::new(SENDER, seq, u32::from(seq) * 480, &payload);
+            assert!(tx.send(packet), "入队失败");
+        }
+        for _ in 0..4 {
+            path.tick();
+        }
+        assert_eq!(path.stats().packets_lost, 0, "保活标记之后的空洞不是丢包");
     }
 
     #[test]

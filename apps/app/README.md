@@ -55,9 +55,11 @@ ui ──invoke──▶ ipc.rs ──▶ session.rs ──▶ hushsquad_client:
 
 ## 还不是真的
 
-`ipc.rs` 顶部有一张表。当前最要紧的两条：
+`ipc.rs` 顶部有一张表。当前只剩一条：
 
-1. **`setVoice` 没有后端**：上行还没有 VAD 门控，麦克风一直在发（语音激活 / PTT / 常开
-   三种模式在行为上还没区别）；
-2. **`selftest` 如实报错**：测量代码在 `audio_io::impulse`，但还没拼成会话里的一次往返。
+1. **`selftest` 如实报错**：测量代码在 `audio_io::impulse`，但还没拼成会话里的一次往返。
    在它之前，网络面板的预算分解与设备段只能显示「未测量」。
+
+`setVoice` / `setPtt` 在 P6-2 已经接上真后端（`audio_core::TxGate`），不再是空实现：
+三种说话方式在行为上真的有区别，Space 按住即强制发送。判据与代价见
+[`ADR-0015`](../../docs/ADR/ADR-0015-上行门控.md)。

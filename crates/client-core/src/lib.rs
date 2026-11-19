@@ -85,10 +85,15 @@ pub enum Incoming<'a> {
         /// Opus 载荷。
         payload: &'a [u8],
     },
-    /// 对方停止说话（DTX 边界）。
+    /// 对方停止说话（DTX 边界 / 门控关闭时的保活标记）。
     Silence {
         /// 谁。
         sender_id: u32,
+        /// 这个标记占用的序号。
+        ///
+        /// 它**占一个序号**是刻意的：接收端按序号空洞数丢包，不占的话一段静默会变成
+        /// 几百个「丢包」。拿到序号之后接收端就能把空洞推过去而不记账。
+        seq: u32,
     },
     /// 绑定成功，顺带给了服务器时间。
     BindAck {
@@ -577,6 +582,7 @@ impl Client {
             }
             PacketKind::Silence => Ok(Incoming::Silence {
                 sender_id: header.sender_id,
+                seq: header.seq,
             }),
             PacketKind::Voice => Ok(Incoming::Voice {
                 sender_id: header.sender_id,

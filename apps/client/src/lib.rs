@@ -18,7 +18,8 @@
 //! - **设备必须 48 kHz**：不做重采样（`rubato` 已在依赖里，留给后续）；
 //! - **音频流 Fatal 不自动重建**：设备被拔会报一条错误，之后这一路就没有声音了；
 //! - **不做回声消除**：外放 + 麦克风会啸叫，请戴耳机；
-//! - **没有 PTT / 权限 / 频道密码**：v1 的服务器还不校验它们。
+//! - **频道密码与服务器侧权限**：v1 的服务器还不校验它们（上行的语音激活 /
+//!   按住说话是**本机**行为，与服务器无关）。
 
 #![deny(unsafe_code)]
 // 这是命令行程序：输出就是它的功能。实时线程里的日志另有纪律（见 audio-core 文档）。
@@ -35,4 +36,4 @@ pub mod voice;
 
 pub use app::{App, PeerSummary, Summary, run, run_with};
 pub use config::Config;
-pub use host::{Command, Host, MetersView, NetView, Phase, StateView};
+pub use host::{Command, Host, MetersView, NetView, Phase, StateView, VoiceMode};

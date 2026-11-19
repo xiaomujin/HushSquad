@@ -69,7 +69,10 @@ export class TauriBackend implements Backend {
     try {
       // `trust` 不传：v1 的信任策略是 TOFU（第一次记住指纹、变了就拒绝），
       // 由 Rust 侧落盘，界面上还没有「手抄指纹」这一步。
-      await invoke('connect', { request: { addr: req.addr, identity: req.identity }, events });
+      await invoke('connect', {
+        request: { addr: req.addr, identity: req.identity, voice: req.voice },
+        events,
+      });
     } catch (error) {
       this.#handlers?.onPhase('error', String(error));
       throw error;
@@ -87,14 +90,21 @@ export class TauriBackend implements Backend {
   }
 
   /**
-   * 上行语音模式。
+   * 上行语音模式：真的改门控（`audio_core::TxGate`）。
    *
-   * **还没有后端实现**：上行还没有 VAD 门控，麦克风一直在发（见
-   * `docs/UI设计-v0.1.md` 的缺口表）。所以这里不做任何事，也不假装成功——
-   * 设置页那一栏明确写着「未接入」。
+   * 它只改**本机**的发包时机，与服务器无关；连接之前改也有效（值会跟着
+   * `connect` 的 `voice` 一起下去）。
    */
-  async setVoice(_settings: VoiceSettings): Promise<void> {
-    console.warn('[hushsquad] setVoice 还没有后端实现：上行 VAD 门控未接入');
+  async setVoice(settings: VoiceSettings): Promise<void> {
+    await invoke('set_voice', {
+      mode: settings.mode,
+      thresholdDb: settings.threshold_db,
+      prerollFrames: settings.preroll_frames,
+    });
+  }
+
+  async setPtt(held: boolean): Promise<void> {
+    await invoke('set_ptt', { held });
   }
 
   async setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void> {

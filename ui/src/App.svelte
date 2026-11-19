@@ -48,11 +48,41 @@
         addr: app.addr,
         identity: { kind: 'anonymous' },
         trust: { kind: 'remember', fingerprint: 'dev' },
+        voice: app.voice,
       });
     }
   });
   let settingsOpen = $state(false);
   const inRoom = $derived(app.phase === 'in_channel' || app.phase === 'joining' || app.phase === 'reconnecting');
+
+  // Space = 强制发送（三种说话方式下都有效，这是设置页给用户的承诺）。
+  //
+  // 这里**抢走**了空格：焦点在按钮上时空格不再「按下那个按钮」。语音软件里这是通行
+  // 做法（按一下空格就把整个房间的按键节奏打乱更糟），但代价要说清楚：只用键盘的人
+  // 只能用 Enter 触发按钮。输入框里打字不受影响。
+  $effect(() => {
+    const typing = (target: EventTarget | null): boolean =>
+      target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+    const down = (event: KeyboardEvent): void => {
+      if (event.code !== 'Space' || event.repeat || typing(event.target)) return;
+      event.preventDefault();
+      if (!inRoom) return;
+      // 没连上时后端会报「还没有连接」；这不是错误，用户只是还没进房间。
+      void backend.setPtt(true).catch(() => {});
+    };
+    const up = (event: KeyboardEvent): void => {
+      if (event.code !== 'Space' || typing(event.target)) return;
+      event.preventDefault();
+      if (!inRoom) return;
+      void backend.setPtt(false).catch(() => {});
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  });
 </script>
 
 {#if settingsOpen}

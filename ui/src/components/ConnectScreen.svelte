@@ -21,6 +21,8 @@
         identity: { kind: 'anonymous' },
         // 信任策略由 Rust 侧的 TOFU 决定：第一次记住指纹，变了就拒绝。
         trust: { kind: 'remember', fingerprint: 'tofu' },
+        // 语音设置跟着连接一起下去：界面一进来就是语音激活，不用等用户去设置页点一下。
+        voice: app.voice,
       });
     } catch (error) {
       failure = String(error);
