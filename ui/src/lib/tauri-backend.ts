@@ -163,6 +163,14 @@ export class TauriBackend implements Backend {
     return invoke<string>('set_ptt_key', { key });
   }
 
+  async loadSettings(): Promise<Record<string, string>> {
+    return invoke<Record<string, string>>('load_settings');
+  }
+
+  async saveSetting(key: string, value: string): Promise<void> {
+    await invoke('save_setting', { key, value });
+  }
+
   async moveUser(userId: number, channelId: number): Promise<void> {
     await invoke('move_user', { userId, channelId });
   }

@@ -197,6 +197,17 @@ impl ClientStore {
         Ok(())
     }
 
+    /// 一次读全部设置（界面启动时用）。
+    pub fn settings(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT k, v FROM settings")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 删一个设置项（回到默认值）。
     pub fn forget_setting(&self, key: &str) -> Result<bool, StoreError> {
         let changed = self

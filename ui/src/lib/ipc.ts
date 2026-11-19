@@ -222,6 +222,15 @@ export interface Backend {
   pttSettings(): Promise<PttSettings>;
   /** 换一个按键，返回规范化之后的写法。认不出 / 被别的程序占了都会抛错。 */
   setPttKey(key: string): Promise<string>;
+  /**
+   * 读出本机全部设置（键值对）。
+   *
+   * 界面启动时读一次，缺的项用自己的默认值补——后端**不**替界面编默认值，
+   * 否则两边各有一套默认值，迟早对不上。
+   */
+  loadSettings(): Promise<Record<string, string>>;
+  /** 存一项设置。 */
+  saveSetting(key: string, value: string): Promise<void>;
   setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void>;
   setUser(userId: number, patch: { volume?: number; mute?: boolean; solo?: boolean }): Promise<void>;
   setView(view: View): Promise<void>;
@@ -298,6 +307,8 @@ export class MockBackend implements Backend {
   #voice: VoiceSettings = { mode: 'vad', threshold_db: -38, preroll_frames: 3 };
   #ptt = false;
   #pttKey = 'Ctrl+Shift+Space';
+  /** Mock 的「本地库」：刷新就没了，但契约与真后端一致。 */
+  #settings: Record<string, string> = {};
   // 单独存一份：`Net.budget` / `Net.device` 是可选字段，展开前得有个确定的类型。
   #budget = { capture: 0, chain: 0.08, encode: 0.14, network: 0.3, jitter: 14, playout: 8 };
   #device = { digital_loopback_ms: 34.3, acoustic_loopback_ms: 175.3 };
@@ -486,6 +497,14 @@ export class MockBackend implements Backend {
   async setPttKey(key: string): Promise<string> {
     this.#pttKey = key;
     return key;
+  }
+
+  async loadSettings(): Promise<Record<string, string>> {
+    return { ...this.#settings };
+  }
+
+  async saveSetting(key: string, value: string): Promise<void> {
+    this.#settings[key] = value;
   }
 
   async setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void> {

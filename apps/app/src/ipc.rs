@@ -440,6 +440,30 @@ pub async fn set_ptt_key(
     Ok(binding.display().to_owned())
 }
 
+// ---------------------------------------------------------------- 设置落盘（B4）
+
+/// 读出本机全部设置。界面启动时读一次。
+///
+/// 键值对而不是一个结构体：偏好的项会一项一项长出来，每加一项就改一次两边结构体，
+/// 迟早对不上。缺的项由界面用自己的默认值补——这里**不**替它编默认值。
+#[tauri::command]
+pub fn load_settings() -> Result<std::collections::BTreeMap<String, String>, String> {
+    let store = hushsquad_client::local::open(None)?;
+    let rows = store
+        .settings()
+        .map_err(|error| format!("读设置失败：{error}"))?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 存一项设置。
+#[tauri::command]
+pub fn save_setting(key: String, value: String) -> Result<(), String> {
+    let store = hushsquad_client::local::open(None)?;
+    store
+        .set_setting(&key, &value)
+        .map_err(|error| format!("存设置失败：{error}"))
+}
+
 // ---------------------------------------------------------------- 管理（ADR-0016）
 
 /// 把别人移到另一个频道（需要 `MOVE_ANYONE`）。

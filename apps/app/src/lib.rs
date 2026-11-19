@@ -43,6 +43,8 @@ pub fn run() {
             ipc::set_ptt,
             ipc::ptt_settings,
             ipc::set_ptt_key,
+            ipc::load_settings,
+            ipc::save_setting,
             ipc::move_user,
             ipc::set_user_state,
             ipc::kick_user,

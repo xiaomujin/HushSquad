@@ -106,6 +106,55 @@
   $effect(() => {
     void refreshPtt();
   });
+
+  // ---------------------------------------------------------------- 设置落盘（B4）
+  //
+  // 只存**真的存在**的偏好：说话方式、灵敏度、视图、上次的服务器地址。
+  // 设备选择与处理档还没接到会话（设置页那两个控件目前只是显示），存一个不起作用的
+  // 值等于骗人，所以等它们真接上了再加。
+  const SETTING_KEYS = ['voice_mode', 'voice_threshold', 'view', 'addr'] as const;
+  let settingsLoaded = $state(false);
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    void backend
+      .loadSettings()
+      .then((saved) => {
+        const mode = saved.voice_mode;
+        if (mode === 'vad' || mode === 'ptt' || mode === 'open') {
+          app.voice = { ...app.voice, mode };
+        }
+        const threshold = Number(saved.voice_threshold);
+        if (saved.voice_threshold && Number.isFinite(threshold)) {
+          app.voice = { ...app.voice, threshold_db: threshold };
+        }
+        if (saved.view === 'grid' || saved.view === 'list') app.view = saved.view;
+        if (saved.addr) app.addr = saved.addr;
+      })
+      .catch(() => {
+        // 读不到就用默认值：一个存坏的库不该让界面起不来。
+      })
+      .finally(() => {
+        settingsLoaded = true;
+      });
+  });
+
+  // 变了就写回去。400 ms 防抖：灵敏度滑杆拖一下会连着改几十次。
+  $effect(() => {
+    const snapshot: Record<(typeof SETTING_KEYS)[number], string> = {
+      voice_mode: app.voice.mode,
+      voice_threshold: String(app.voice.threshold_db),
+      view: app.view,
+      addr: app.addr,
+    };
+    if (!settingsLoaded) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      for (const key of SETTING_KEYS) {
+        void backend.saveSetting(key, snapshot[key]).catch(() => {});
+      }
+    }, 400);
+  });
 </script>
 
 {#if app.settingsOpen}
