@@ -28,7 +28,13 @@
       app.members = members;
       app.selfUserId = selfUserId;
       const me = members.find((m) => m.user_id === selfUserId);
-      if (me) app.selfMute = me.mute;
+      if (me) {
+        // 静音 / 闭听是**服务器广播回来的**（`SetSelfState` → `UserUpdated`），
+        // 不是本机自己记的：这样别人也看得见你静音了，两边不会各说各话。
+        // 读 `self_mute` 而不是 `mute`——后者是「我这边不播他的声音」，对自己没意义。
+        app.selfMute = me.self_mute;
+        app.deafen = me.self_deaf;
+      }
     },
     onMeters(meters) {
       app.meters = meters;

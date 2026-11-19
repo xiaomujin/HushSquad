@@ -15,8 +15,8 @@
     event.preventDefault();
     const items: MenuItem[] = [];
     if (isSelf(m.user_id)) {
-      items.push({ label: m.mute ? '取消静音' : '静音自己', run: () => backend.setSelf({ mute: !m.mute }) });
-      items.push({ label: app.deafen ? '取消闭听' : '闭听', run: () => backend.setSelf({ deafen: !app.deafen }) });
+      items.push({ label: m.self_mute ? '取消静音' : '静音自己', run: () => backend.setSelf({ mute: !m.self_mute }) });
+      items.push({ label: m.self_deaf ? '取消闭听' : '闭听', run: () => backend.setSelf({ deafen: !m.self_deaf }) });
     } else {
       // 本机设置：谁都能改，只影响自己听。
       items.push({ label: m.mute ? '取消静音（本机）' : '静音他（本机）', run: () => backend.setUser(m.user_id, { mute: !m.mute }) });
@@ -60,12 +60,17 @@
   }
   const level = (id: number): number => app.meters.levels[id] ?? 0;
   const isSelf = (id: number): boolean => id === app.selfUserId;
+  /** 这个人的声音到我这儿是断的：要么我静音了他，要么他自己静音了。 */
+  const muted = (m: Member): boolean => m.mute || m.self_mute;
   const talking = (id: number, mute: boolean): boolean => !mute && level(id) > 0.25;
 
-  function subline(id: number, mute: boolean): string {
-    if (isSelf(id)) return app.meters.tx ? `${dbfs(level(id))} · 发送中` : '上行 32 kbps';
-    if (mute) return '静音';
-    const lv = level(id);
+  function subline(m: Member): string {
+    if (isSelf(m.user_id)) {
+      if (m.self_mute) return '静音 · 不发上行';
+      return app.meters.tx ? `${dbfs(level(m.user_id))} · 发送中` : '上行 32 kbps';
+    }
+    if (muted(m)) return '静音';
+    const lv = level(m.user_id);
     return lv > 0.02 ? dbfs(lv) : '在听';
   }
 </script>
@@ -77,7 +82,7 @@
         role="listitem"
         class="tile"
         class:self={isSelf(m.user_id)}
-        class:speaking={talking(m.user_id, m.mute)}
+        class:speaking={talking(m.user_id, muted(m))}
         class:muted={m.mute && !isSelf(m.user_id)}
         oncontextmenu={(event) => memberMenu(event, m)}
       >
@@ -85,17 +90,19 @@
         <div class="t-nm">
           {m.name}
           {#if isSelf(m.user_id)}<span class="badge you">你</span>{/if}
-          {#if m.mute}<span class="badge mute">静音</span>{/if}
+          {#if muted(m)}<span class="badge mute">静音</span>{/if}
           {#if m.solo}<span class="badge solo">独听</span>{/if}
         </div>
-        <div class="t-sub mono">{subline(m.user_id, m.mute)}</div>
+        <div class="t-sub mono">{subline(m)}</div>
         <div class="bar"><i style="width:{levelPct(level(m.user_id))}%"></i></div>
         <div class="t-ctl">
           {#if isSelf(m.user_id)}
-            <button class="mini" class:on={m.mute} onclick={() => backend.setSelf({ mute: !m.mute })}>
-              {m.mute ? '取消静音' : '静音自己'}
+            <button class="mini" class:on={m.self_mute} onclick={() => backend.setSelf({ mute: !m.self_mute })}>
+              {m.self_mute ? '取消静音' : '静音自己'}
             </button>
-            <button class="mini" onclick={() => backend.setSelf({ deafen: !app.deafen })}>闭听</button>
+            <button class="mini" class:on={m.self_deaf} onclick={() => backend.setSelf({ deafen: !m.self_deaf })}>
+              {m.self_deaf ? '取消闭听' : '闭听'}
+            </button>
           {:else}
             <input
               type="range"
@@ -122,14 +129,14 @@
       <div
         role="listitem"
         class="lrow"
-        class:speaking={talking(m.user_id, m.mute)}
+        class:speaking={talking(m.user_id, muted(m))}
         oncontextmenu={(event) => memberMenu(event, m)}
       >
         <div class="ava md {avatarClass(m.user_id)}">{initial(m.name)}</div>
         <div class="nm">
           {m.name}
           {#if isSelf(m.user_id)}<span class="badge you">你</span>{/if}
-          {#if m.mute}<span class="badge mute">静音</span>{/if}
+          {#if muted(m)}<span class="badge mute">静音</span>{/if}
           {#if m.solo}<span class="badge solo">独听</span>{/if}
         </div>
         <div class="lvl"><i style="width:{levelPct(level(m.user_id))}%"></i></div>
@@ -149,7 +156,14 @@
           {/if}
         </div>
         <div class="ops">
-          {#if !isSelf(m.user_id)}
+          {#if isSelf(m.user_id)}
+            <button class="mini" class:on={m.self_mute} onclick={() => backend.setSelf({ mute: !m.self_mute })}>
+              {m.self_mute ? '取消静音' : '静音'}
+            </button>
+            <button class="mini" class:on={m.self_deaf} onclick={() => backend.setSelf({ deafen: !m.self_deaf })}>
+              {m.self_deaf ? '取消闭听' : '闭听'}
+            </button>
+          {:else}
             <button class="mini" onclick={() => backend.setUser(m.user_id, { mute: !m.mute })}>
               {m.mute ? '取消静音' : '静音'}
             </button>

@@ -234,7 +234,7 @@ start "docs/ui/mockup.html?only=1&s=6"          # 只看某一屏
 | 频道树（分组 → 频道 → 子频道、折叠、子树人数） | ✅ 已实现（`src/lib/tree.ts` 有纯函数） |
 | 成员网格 / 列表双视图 | ✅ 已实现，频道头切换 |
 | 按人音量 / 静音 / 独听（常显） | ✅ 已实现，接的是本地混音器的 `set_gain_db` / `set_muted` / `set_solo` |
-| 自己静音 / 闭听 | ✅ 已实现（静音不发上行；闭听把所有远端轨静音） |
+| 自己静音 / 闭听 | ✅ 已实现（静音不发上行；闭听把所有远端轨静音）。状态**走服务器**：`SetSelfState` → `UserUpdated` → 界面读 `Member.self_mute` / `self_deaf`，所以别人也看得见你静音了，按钮从「静音」变成「取消静音」 |
 | 语音激活状态灯 + 麦克风电平 | ✅ 已实现（20 Hz 合并推送，电平来自采集峰值） |
 | **三种说话方式（语音激活 / 按住说话 / 常开）** | ✅ **已实现**：`audio_core::TxGate` + `set_voice` / `set_ptt`，Space 强制发送；设置页有实时 VAD 概率条 |
 | 对方电平 | ✅ 已实现（混音器取数据时量的，不是估的） |
@@ -246,7 +246,7 @@ start "docs/ui/mockup.html?only=1&s=6"          # 只看某一屏
 | **权限：服务器面板** | ✅ 已实现：账号表（在线/离线/角色/位），角色下拉改完立刻生效并落库；服主那行只读（只能转移） |
 | **频道树编辑** | ✅ 已实现（`ADR-0017`）：频道右键菜单（加入 / 新建子频道 / 重命名 / 设为分组 / 人数上限 / 删除，无权限项**灰掉并写明原因**）、区头 `+` 与右键、四种落点的**拖拽排序**（主体=成为子节点、间隙=插为兄弟、空白区=根级末尾；成环与超深不给高亮）、新建/改名/人数上限/删除的模态对话框（成功看服务器快照、失败红字留在框里、3 s 超时） |
 
-`pnpm check` = 0 errors / 0 warnings；`pnpm build` = 101 KB JS（gzip 37 KB）+ 23 KB CSS。
+`pnpm check` = 0 errors / 0 warnings；`pnpm build` = 102 KB JS（gzip 38 KB）+ 23 KB CSS。
 
 ### 真壳跑出来的图
 
@@ -264,6 +264,7 @@ start "docs/ui/mockup.html?only=1&s=6"          # 只看某一屏
 | `docs/ui/shots/app-tauri-channel-dialog.png` | 新建频道对话框：名字 + 「建成分组」勾选框 |
 | `docs/ui/shots/app-tauri-channel-delete.png` | 删除确认：写明频道名与「删除之后没法撤销」，确认按钮是危险色 |
 | `docs/ui/shots/app-tauri-channel-conflict.png` | 重名被服务器拒绝：对话框不关，红字说明，改个名字就能重试 |
+| `docs/ui/shots/app-tauri-mute.png` | 自己静音之后：卡片上出现「静音」标记、副行写「静音 · 不发上行」，底栏那个按钮变成「取消静音」（再点一下就回来） |
 
 ### 还没做的（按优先级）
 

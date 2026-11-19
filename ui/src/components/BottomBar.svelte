@@ -3,7 +3,11 @@
   import { dbfs, levelPct } from '../lib/format';
   import { app } from '../lib/state.svelte';
 
-  const selfMute = $derived(app.self?.mute ?? false);
+  // 静音 / 闭听是服务器广播回来的状态（`Member.self_mute`），不是界面自己记的：
+  // 之前这里读的是 `app.self?.mute`（本机把某人静音的偏好），对自己永远是 false，
+  // 于是按钮点下去什么都不变，看起来像「没有恢复按钮」。
+  const selfMute = $derived(app.selfMute);
+  const deafen = $derived(app.deafen);
   const sending = $derived(app.meters.tx && !selfMute);
   const reconnecting = $derived(app.phase === 'reconnecting');
 
@@ -42,9 +46,21 @@
   </div>
 
   <div class="actions">
-    <button class="act" class:on={selfMute} onclick={() => backend.setSelf({ mute: !selfMute })}>
-      静音
+    <button
+      class="act"
+      class:on={selfMute}
+      aria-pressed={selfMute}
+      onclick={() => backend.setSelf({ mute: !selfMute })}
+    >
+      {selfMute ? '取消静音' : '静音'}
     </button>
-    <button class="act" class:on={app.deafen} onclick={() => backend.setSelf({ deafen: !app.deafen })}>闭听</button>
+    <button
+      class="act"
+      class:on={deafen}
+      aria-pressed={deafen}
+      onclick={() => backend.setSelf({ deafen: !deafen })}
+    >
+      {deafen ? '取消闭听' : '闭听'}
+    </button>
   </div>
 </footer>

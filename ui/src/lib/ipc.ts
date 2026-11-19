@@ -34,7 +34,11 @@ export interface Member {
   user_id: number;
   name: string;
   channel_id: number;
-  /** 自己静音（对别人）。 */
+  /** 他自己静音了（服务器广播的，别人也看得见）。 */
+  self_mute: boolean;
+  /** 他自己闭听了。 */
+  self_deaf: boolean;
+  /** 本机把他静音了（只听不到他，他的上行照常）。 */
   mute: boolean;
   /** 独听（只听他）。 */
   solo: boolean;
@@ -289,9 +293,9 @@ export class MockBackend implements Backend {
     this.#handlers?.onPhase('authenticating');
     await sleep(280);
     this.#members = [
-      { user_id: SELF, name: '小木', channel_id: HALL, mute: false, solo: false, server_mute: false, volume: 100 },
-      { user_id: 2, name: '老K', channel_id: HALL, mute: false, solo: false, server_mute: false, volume: 100 },
-      { user_id: 3, name: '阿岚', channel_id: HALL, mute: true, solo: false, server_mute: false, volume: 80 },
+      { user_id: SELF, name: '小木', channel_id: HALL, self_mute: false, self_deaf: false, mute: false, solo: false, server_mute: false, volume: 100 },
+      { user_id: 2, name: '老K', channel_id: HALL, self_mute: false, self_deaf: false, mute: false, solo: false, server_mute: false, volume: 100 },
+      { user_id: 3, name: '阿岚', channel_id: HALL, self_mute: true, self_deaf: false, mute: true, solo: false, server_mute: false, volume: 80 },
     ];
     // Mock 里自己是服主：这样评审时能看见管理面板与右键菜单。
     this.#handlers?.onPerms(511);
@@ -437,7 +441,14 @@ export class MockBackend implements Backend {
   }
 
   async setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void> {
-    for (const m of this.#members) if (m.user_id === SELF && state.mute !== undefined) m.mute = state.mute;
+    // 真后端是「发一条 SetSelfState，等服务器广播 UserUpdated 回来」；Mock 里
+    // 服务器不存在，就自己把那份成员表改掉——**改的是 self_mute，不是 mute**，
+    // 否则界面在浏览器里和真机上看到的就不是同一个字段了。
+    for (const m of this.#members) {
+      if (m.user_id !== SELF) continue;
+      if (state.mute !== undefined) m.self_mute = state.mute;
+      if (state.deafen !== undefined) m.self_deaf = state.deafen;
+    }
     this.#handlers?.onMembers(this.#members, SELF);
   }
 

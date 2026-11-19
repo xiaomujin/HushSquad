@@ -77,7 +77,14 @@ pub struct MemberView {
     pub name: String,
     /// 所在频道。
     pub channel_id: u32,
-    /// 本机把这个人静音了。
+    /// 他自己静音了（他自己按的，服务器广播出来的；别人也看得见）。
+    ///
+    /// 与下面的 `mute` 是两件不同的事：`mute` 是「我这边不播他的声音」，
+    /// 只有我看得见；`self_mute` 是「他不说话了」，谁都看得见。
+    pub self_mute: bool,
+    /// 他自己闭听了。
+    pub self_deaf: bool,
+    /// 本机把这个人静音了（只听不到他，他的上行照常）。
     pub mute: bool,
     /// 本机独听这个人。
     pub solo: bool,

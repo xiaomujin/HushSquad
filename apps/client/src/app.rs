@@ -1173,11 +1173,18 @@ impl<'a> App<'a> {
                         self.gate.reset();
                         self.gate_quiet = 0;
                     }
+                    // 告诉服务器。不说的话只有本机不发，别人既看不到「静音」标记，
+                    // 也不知道你在听——界面上的按钮会一直显示「静音自己」，看起来像
+                    // 点了没反应。`SetSelfState` 早就定义好了，只是从来没被发出去过。
+                    let action = self.client.set_self_state(self.muted, self.deafened);
+                    write_actions(writer, vec![action]).await?;
                     self.dirty = true;
                 }
                 Command::SetDeafen(deafened) => {
                     self.deafened = deafened;
                     self.sync_mixer();
+                    let action = self.client.set_self_state(self.muted, self.deafened);
+                    write_actions(writer, vec![action]).await?;
                     self.dirty = true;
                 }
                 Command::SetVoice {
@@ -1734,6 +1741,8 @@ fn member_views(
                 user_id: member.user_id,
                 name: member.name.clone(),
                 channel_id: member.channel_id,
+                self_mute: member.self_mute,
+                self_deaf: member.self_deaf,
                 mute: local.mute,
                 solo: local.solo,
                 server_mute: member.server_mute,
@@ -2064,6 +2073,41 @@ mod tests {
         assert_eq!(pick_channel(&client, "大厅").unwrap(), 7);
         assert_eq!(pick_channel(&client, "7").unwrap(), 7);
         assert!(pick_channel(&client, "不存在").is_err());
+    }
+
+    #[test]
+    fn member_view_takes_self_mute_from_the_server_not_from_the_local_pref() {
+        // 这两个布尔方向相反：`self_mute` 是「他自己静音了」（服务器广播的），
+        // `mute` 是「我这边不播他的声音」（纯本机）。P7-2b 的 bug 就是把后者
+        // 当成自己的状态读，于是按钮点了毫无反应。
+        let mut client = Client::new();
+        client.on_message(ControlMessage {
+            protocol: protocol::PROTOCOL_VERSION,
+            request_id: 0,
+            kind: Some(Kind::UserUpdated(protocol::control::proto::UserUpdated {
+                user: Some(protocol::control::proto::UserState {
+                    user_id: 7,
+                    sender_id: 3,
+                    name: "小木".to_owned(),
+                    channel_id: 1,
+                    self_mute: true,
+                    self_deaf: false,
+                    ..Default::default()
+                }),
+            })),
+        });
+        let views = member_views(
+            &client,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            0,
+        );
+        let me = views
+            .iter()
+            .find(|v| v.user_id == 7)
+            .expect("成员表里要有他");
+        assert!(me.self_mute, "服务器说静音了，MemberView 必须照搬");
+        assert!(!me.mute, "本机静音偏好是另一件事，这里从来没设过");
     }
 
     #[test]
