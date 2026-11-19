@@ -71,7 +71,8 @@
     </div>
 
     <div class="tree">
-      <div class="side-h">频道</div>
+      <!-- 「频道」区头由 ChannelTree 自己渲染：区头要能右键新建、还能当根级拖拽落点，
+           放在这里就得把菜单和拖拽状态往上提一层，没有好处。 -->
       <ChannelTree />
     </div>
 

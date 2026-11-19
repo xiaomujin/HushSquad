@@ -149,13 +149,15 @@ fn spawn_client(config: Config) -> std::thread::JoinHandle<Result<Summary, Strin
 impl Harness {
     /// 服务器账号库里有多少个账号（用来断言「同一个设备号没被重复建号」）。
     fn account_count(&self) -> u32 {
-        let store = store::users::UserStore::open(&self.dir.join("server.db")).expect("打开账号库");
+        let store =
+            store::server::ServerStore::open(&self.dir.join("server.db")).expect("打开账号库");
         store.count().expect("数账号")
     }
 
     /// 匿名账号数。
     fn anonymous_count(&self) -> u32 {
-        let store = store::users::UserStore::open(&self.dir.join("server.db")).expect("打开账号库");
+        let store =
+            store::server::ServerStore::open(&self.dir.join("server.db")).expect("打开账号库");
         store.anonymous_count().expect("数匿名账号")
     }
 }

@@ -244,9 +244,9 @@ start "docs/ui/mockup.html?only=1&s=6"          # 只看某一屏
 | 重连态 | ✅ 界面已支持，后端还没产生这个状态 |
 | **权限：成员右键菜单** | ✅ 已实现（`ADR-0016`）：本机音量/静音/独听 + 移到频道 + 服务器静音 + 踢人 + 权限…；无权限的项**灰掉并写明原因**，不隐藏 |
 | **权限：服务器面板** | ✅ 已实现：账号表（在线/离线/角色/位），角色下拉改完立刻生效并落库；服主那行只读（只能转移） |
-| 频道树编辑（新建/改名/删除/拖拽排序） | ⬜ P7-2。协议里只有广播，还没有请求消息；频道树也还没落盘 |
+| **频道树编辑** | ✅ 已实现（`ADR-0017`）：频道右键菜单（加入 / 新建子频道 / 重命名 / 设为分组 / 人数上限 / 删除，无权限项**灰掉并写明原因**）、区头 `+` 与右键、四种落点的**拖拽排序**（主体=成为子节点、间隙=插为兄弟、空白区=根级末尾；成环与超深不给高亮）、新建/改名/人数上限/删除的模态对话框（成功看服务器快照、失败红字留在框里、3 s 超时） |
 
-`pnpm check` = 0 errors / 0 warnings；`pnpm build` = 75 KB JS（gzip 28 KB）+ 19 KB CSS。
+`pnpm check` = 0 errors / 0 warnings；`pnpm build` = 101 KB JS（gzip 37 KB）+ 23 KB CSS。
 
 ### 真壳跑出来的图
 
@@ -257,12 +257,19 @@ start "docs/ui/mockup.html?only=1&s=6"          # 只看某一屏
 | `docs/ui/shots/app-tauri-panel.png` | 网络面板：抖动 36 ms、丢包 1、RTT 0.4/0.5、上行 46.5 kbps、tick 100 Hz |
 | `docs/ui/shots/app-tauri-ptt.png` | 按住 Space：顶栏「正在发送」、底栏按钮变绿、成员卡「发送中」——而麦克风是安静的 |
 | `docs/ui/shots/app-tauri-voice.png` | 设置页「说话方式」：三档、灵敏度滑杆、实时 VAD 概率条与门开合；自检两栏如实写「未测量」 |
+| `docs/ui/shots/app-tauri-perm-menu.png` | 成员右键菜单：本机那两项常显，管理项按权限出现（无权限则灰掉并写明原因） |
+| `docs/ui/shots/app-tauri-perm-panel.png` | 设置页「服务器」：账号表 + 角色下拉，服主那行只读 |
+| `docs/ui/shots/app-tauri-channel-menu.png` | 频道右键菜单：加入 / 新建子频道 / 重命名 / 设为分组 / 人数上限 / 删除（红字） |
+| `docs/ui/shots/app-tauri-channel-drag.png` | 拖拽中：被拖的行变暗，「大厅」上沿出现落点横线（插到它前面） |
+| `docs/ui/shots/app-tauri-channel-dialog.png` | 新建频道对话框：名字 + 「建成分组」勾选框 |
+| `docs/ui/shots/app-tauri-channel-delete.png` | 删除确认：写明频道名与「删除之后没法撤销」，确认按钮是危险色 |
+| `docs/ui/shots/app-tauri-channel-conflict.png` | 重名被服务器拒绝：对话框不关，红字说明，改个名字就能重试 |
 
 ### 还没做的（按优先级）
 
 1. **自检**（数字 / 声学回环）——`audio_io::impulse` 有测量代码，但还没拼成会话里的一次往返；
    在它之前，网络面板的预算分解与设备段两栏只能显示「未测量」；
-2. **服务器预建频道树**（现在只有根「大厅」，分组/子频道只能靠测试里的 `add_channel`）；
+2. **键盘移动频道**（`Alt+↑/↓`）——拖拽已经覆盖功能，但键盘用户排不了序（P7-3）；
 3. 设置落盘（设备选择、处理链档位、视图偏好都还没存）；
 4. 麦克风测试（采集 5 s → 播放）；
 5. 用真实风扇/空调录音复核门控判据（合成素材上 RNNoise 把风扇判成语音，C-55）。

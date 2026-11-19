@@ -301,6 +301,63 @@ pub fn set_user_perms(state: State<'_, AppState>, user_id: u32, perms: u64) -> R
     state.send(Command::SetUserPerms { user_id, perms })
 }
 
+// ---------------------------------------------------------------- 频道结构（P7-2）
+
+/// 新建频道（需要 `CREATE_CHANNEL`）。`max_users = 0` 表示用服务器默认。
+#[tauri::command]
+pub fn create_channel(
+    state: State<'_, AppState>,
+    parent_id: u32,
+    name: String,
+    flags: u64,
+    max_users: u32,
+) -> Result<(), String> {
+    state.send(Command::CreateChannel {
+        parent_id,
+        name,
+        flags,
+        max_users,
+    })
+}
+
+/// 改名 / 人数上限 / 标志位（需要 `MANAGE_CHANNEL`）。`None` 表示不改这一项。
+#[tauri::command]
+pub fn update_channel(
+    state: State<'_, AppState>,
+    channel_id: u32,
+    name: Option<String>,
+    max_users: Option<u32>,
+    flags: Option<u64>,
+) -> Result<(), String> {
+    state.send(Command::UpdateChannel {
+        channel_id,
+        name,
+        max_users,
+        flags,
+    })
+}
+
+/// 把频道移到另一个父级的第 `position` 位（需要 `MANAGE_CHANNEL`）。
+#[tauri::command]
+pub fn move_channel(
+    state: State<'_, AppState>,
+    channel_id: u32,
+    parent_id: u32,
+    position: u32,
+) -> Result<(), String> {
+    state.send(Command::MoveChannel {
+        channel_id,
+        parent_id,
+        position,
+    })
+}
+
+/// 删除频道（连同子树，需要 `MANAGE_CHANNEL`）。服务器会拒绝删「里面还有人的」。
+#[tauri::command]
+pub fn delete_channel(state: State<'_, AppState>, channel_id: u32) -> Result<(), String> {
+    state.send(Command::DeleteChannel { channel_id })
+}
+
 // ---------------------------------------------------------------- 信任
 
 /// 忘掉这台服务器记住的证书指纹与免密 token。

@@ -30,6 +30,8 @@ pub enum Command {
     Promote(String),
     /// 列账号。
     List,
+    /// 列频道树。
+    Channels,
     /// 重新生成证书。
     Cert,
     /// 打印用法。
@@ -46,6 +48,7 @@ pub const USAGE: &str = r"HushSquad 服务器
   hushsquad-server del <用户名>           删账号
   hushsquad-server promote <用户名>       把服主位给这个账号（换人 / 服主号丢了时用）
   hushsquad-server ls                     列出账号（含权限）
+  hushsquad-server channels               列出频道树
   hushsquad-server cert                   重新生成自签证书
 
 选项（都有默认值，一般一个都不用给）：
@@ -56,7 +59,8 @@ pub const USAGE: &str = r"HushSquad 服务器
   --voice-bind <地址>    语音面监听（默认 0.0.0.0:64739）
   --voice-host <主机>    对外宣告的语音地址（默认自动取本机局域网 IP）
   --voice-port <端口>    对外宣告的语音端口（默认同 --voice-bind）
-  --channel <名字>       预建频道（可重复；默认建一个「大厅」）
+  --channel <名字>       **首次建库时**的初始频道（可重复；默认一个「大厅」）。
+                         库里有频道之后这个参数被忽略 —— 之后改结构请在客户端里右键
   --no-anonymous         不允许「只用设备号」的匿名登录
   --max-anonymous <数量> 匿名账号上限（默认 200）
   --metrics-interval <秒> 指标打印间隔（默认 60，0 表示不打印）
@@ -169,6 +173,7 @@ impl Config {
                 "del" => config.command = Command::DelUser(value()?),
                 "promote" => config.command = Command::Promote(value()?),
                 "ls" => config.command = Command::List,
+                "channels" => config.command = Command::Channels,
                 "cert" => config.command = Command::Cert,
                 other => return Err(format!("未知参数 {other:?}")),
             }
@@ -224,6 +229,7 @@ mod tests {
             Command::DelUser("alice".to_owned())
         );
         assert_eq!(parse(&["ls"]).unwrap().command, Command::List);
+        assert_eq!(parse(&["channels"]).unwrap().command, Command::Channels);
         assert_eq!(parse(&["cert"]).unwrap().command, Command::Cert);
         assert_eq!(parse(&["--help"]).unwrap().command, Command::Help);
         assert!(parse(&["adduser"]).is_err(), "缺用户名要报错");

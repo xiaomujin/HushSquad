@@ -19,6 +19,8 @@
       }
     },
     onChannels(channels, selfChannel) {
+      // 服务器给了新快照：以它为准。丢掉拖拽的覆盖层，这就是「回滚」的全部。
+      app.dropPendingTree();
       app.channels = channels;
       app.selfChannel = selfChannel;
     },
@@ -39,6 +41,12 @@
     },
     onNet(net) {
       app.net = net;
+    },
+    onNotice(message) {
+      // 服务器拒绝了一次操作：提示一下就好，连接和语音都不受影响。
+      // 顺手丢掉拖拽的覆盖层——拒绝意味着「你以为的顺序」不成立，回到服务器的样子。
+      app.dropPendingTree();
+      app.notify(message);
     },
   });
 
@@ -100,3 +108,9 @@
 {/if}
 
 <ContextMenu />
+
+{#if app.notice}
+  <!-- 非致命提示：浮在底部中央，3 秒后自己消失（计时在 app.notify 里）。
+       `role="status"` 让读屏软件念出来，但不用抢焦点。 -->
+  <div class="toast" role="status">{app.notice}</div>
+{/if}

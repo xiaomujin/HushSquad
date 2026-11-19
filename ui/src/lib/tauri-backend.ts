@@ -53,7 +53,8 @@ type WireEvent =
   | ({ kind: 'state' } & WireState)
   | ({ kind: 'meters' } & Meters)
   | ({ kind: 'net' } & WireNet)
-  | { kind: 'accounts'; accounts: Account[] };
+  | { kind: 'accounts'; accounts: Account[] }
+  | { kind: 'notice'; message: string };
 
 /** 真后端。 */
 export class TauriBackend implements Backend {
@@ -91,6 +92,36 @@ export class TauriBackend implements Backend {
 
   async joinChannel(channelId: number): Promise<void> {
     await invoke('join_channel', { channelId });
+  }
+
+  async createChannel(parentId: number, name: string, flags: number, maxUsers: number): Promise<void> {
+    await invoke('create_channel', { parentId, name, flags, maxUsers });
+  }
+
+  /**
+   * 只把**给了的**项传下去：Rust 侧是 `Option`，缺 key 才是 `None`。
+   *
+   * 传 `undefined` 会被 Tauri 序列化成 `null`，那在 Rust 里同样是 `None`——
+   * 但显式省略更直白，也不依赖 IPC 层的 null 处理。
+   */
+  async updateChannel(
+    channelId: number,
+    patch: { name?: string; maxUsers?: number; flags?: number },
+  ): Promise<void> {
+    await invoke('update_channel', {
+      channelId,
+      ...(patch.name === undefined ? {} : { name: patch.name }),
+      ...(patch.maxUsers === undefined ? {} : { maxUsers: patch.maxUsers }),
+      ...(patch.flags === undefined ? {} : { flags: patch.flags }),
+    });
+  }
+
+  async moveChannel(channelId: number, parentId: number, position: number): Promise<void> {
+    await invoke('move_channel', { channelId, parentId, position });
+  }
+
+  async deleteChannel(channelId: number): Promise<void> {
+    await invoke('delete_channel', { channelId });
   }
 
   /**
@@ -191,6 +222,9 @@ export class TauriBackend implements Backend {
         break;
       case 'accounts':
         handlers.onAccounts(event.accounts);
+        break;
+      case 'notice':
+        handlers.onNotice(event.message);
         break;
     }
   }

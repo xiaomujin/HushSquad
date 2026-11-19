@@ -230,6 +230,42 @@ pub enum Command {
         /// 新的权限位图。
         perms: u64,
     },
+    /// 新建频道（需要 `CREATE_CHANNEL`）。
+    CreateChannel {
+        /// 父频道；0 表示根。
+        parent_id: u32,
+        /// 名字（服务器会去首尾空白、查重）。
+        name: String,
+        /// 位标志（8 = 分组容器）。
+        flags: u64,
+        /// 人数上限；0 表示用服务器默认。
+        max_users: u32,
+    },
+    /// 改名 / 人数上限 / 标志位（需要 `MANAGE_CHANNEL`）。`None` 表示不改这一项。
+    UpdateChannel {
+        /// 频道 id。
+        channel_id: u32,
+        /// 新名字。
+        name: Option<String>,
+        /// 新的人数上限。
+        max_users: Option<u32>,
+        /// 新的位标志。
+        flags: Option<u64>,
+    },
+    /// 把频道移到另一个父级的第 `position` 位（需要 `MANAGE_CHANNEL`）。
+    MoveChannel {
+        /// 频道 id。
+        channel_id: u32,
+        /// 目标父频道；0 表示根。
+        parent_id: u32,
+        /// 同级下标（由前端算好）。
+        position: u32,
+    },
+    /// 删除频道（连同子树，需要 `MANAGE_CHANNEL`）。
+    DeleteChannel {
+        /// 频道 id。
+        channel_id: u32,
+    },
     /// 调某个人的本机音量 / 静音 / 独听。
     SetUser {
         /// 账号 id。
@@ -260,6 +296,11 @@ pub trait Host: Send {
     fn net(&self, net: &NetView);
     /// 账号列表（只在管理面板请求之后来一次）。
     fn accounts(&self, accounts: &[AccountView]);
+    /// 一条**非致命**的提示（服务器拒绝了一次操作、请求超时）。
+    ///
+    /// 与 `Phase::Error` 分开：`Error` 表示会话没了，这里表示「这件事没做成，但还能继续用」。
+    /// 命令行外壳不实现它（错误已经打到 stderr 了）；图形外壳拿它弹一条提示。
+    fn notice(&self, _message: &str) {}
     /// 取一条待执行指令。
     fn command(&self) -> Option<Command>;
 }

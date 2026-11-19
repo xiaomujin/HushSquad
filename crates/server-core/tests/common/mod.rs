@@ -113,6 +113,84 @@ pub fn roles() -> (Server, MemAdmin) {
     (server, admin)
 }
 
+/// 频道树存储的内存实现（测试用）。
+///
+/// 生产里是 SQLite（`store::channels`），但「什么时候写、写进去的是什么」全由
+/// `server-core` 决定，所以一张表就能测干净。
+#[derive(Debug, Clone, Default)]
+pub struct MemTree {
+    rows: std::sync::Arc<std::sync::Mutex<Vec<server_core::ChannelRow>>>,
+}
+
+impl MemTree {
+    /// 空库。
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// 按 `(id, 父级, 名字, 顺序)` 预置一棵树。
+    #[must_use]
+    pub fn with(rows: &[(u32, u32, &str, u32)]) -> Self {
+        Self {
+            rows: std::sync::Arc::new(std::sync::Mutex::new(
+                rows.iter()
+                    .map(|(id, parent, name, position)| server_core::ChannelRow {
+                        channel_id: *id,
+                        parent_id: *parent,
+                        name: (*name).to_owned(),
+                        position: *position,
+                        max_users: 0,
+                        flags: 0,
+                        description: String::new(),
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    /// 现在库里是什么（断言用）。
+    #[must_use]
+    pub fn rows(&self) -> Vec<server_core::ChannelRow> {
+        self.rows.lock().expect("锁没中毒").clone()
+    }
+
+    /// 库里的名字，按 `(父级, 顺序)` 排好。
+    #[must_use]
+    pub fn names(&self) -> Vec<(u32, u32, String)> {
+        let mut rows = self.rows();
+        rows.sort_by_key(|row| (row.parent_id, row.position, row.channel_id));
+        rows.into_iter()
+            .map(|row| (row.parent_id, row.position, row.name))
+            .collect()
+    }
+}
+
+impl server_core::ChannelStore for MemTree {
+    fn load(&self) -> Result<Vec<server_core::ChannelRow>, String> {
+        Ok(self.rows())
+    }
+
+    fn save(&self, rows: &[server_core::ChannelRow]) -> Result<(), String> {
+        *self.rows.lock().expect("锁没中毒") = rows.to_vec();
+        Ok(())
+    }
+}
+
+/// 一个写不进去的存储（测「落盘失败」的提示）。
+#[derive(Debug, Clone, Copy)]
+pub struct BrokenTree;
+
+impl server_core::ChannelStore for BrokenTree {
+    fn load(&self) -> Result<Vec<server_core::ChannelRow>, String> {
+        Ok(Vec::new())
+    }
+
+    fn save(&self, _rows: &[server_core::ChannelRow]) -> Result<(), String> {
+        Err("磁盘满了".to_owned())
+    }
+}
+
 fn hello() -> ControlMessage {
     ControlMessage {
         protocol: 1,

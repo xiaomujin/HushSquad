@@ -109,6 +109,14 @@ pub enum Event {
         /// 账号 id。
         user_id: UserId,
     },
+    /// 频道结构变了（P7-2）。只记频道 id 与动作名，不记名字 ——
+    /// 频道名是用户内容，和「谁说了什么」同一类东西。
+    ChannelChanged {
+        /// 频道 id。
+        channel: ChannelId,
+        /// 动作短名：`create` / `update` / `move` / `delete`。
+        action: &'static str,
+    },
 }
 
 impl Event {
@@ -126,6 +134,7 @@ impl Event {
             Self::JoinedChannel { .. } => "joined_channel",
             Self::LeftChannel { .. } => "left_channel",
             Self::PermsChanged { .. } => "perms_changed",
+            Self::ChannelChanged { .. } => "channel_changed",
         }
     }
 
@@ -157,7 +166,7 @@ mod tests {
         // 「不记内容」这条红线的机器可检查版本：事件的字段名只允许白名单里的这些，
         // 所以没人能顺手加一个 payload / message / opus 字段而不被发现。
         const ALLOWED: &[&str] = &[
-            "event", "session", "user_id", "addr", "from", "to", "channel", "reason",
+            "event", "session", "user_id", "addr", "from", "to", "channel", "reason", "action",
         ];
         let samples = [
             Event::SessionOpened { session: 1 },
@@ -192,6 +201,10 @@ mod tests {
                 channel: 3,
             },
             Event::PermsChanged { user_id: 4 },
+            Event::ChannelChanged {
+                channel: 3,
+                action: "create",
+            },
         ];
         for sample in samples {
             let json = sample.to_json();

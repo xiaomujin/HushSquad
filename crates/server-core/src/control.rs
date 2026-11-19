@@ -1,6 +1,6 @@
-//! 控制面最小集：ClientHello → Auth → ChannelSync → JoinChannel → UserJoined/Left → Ping/Pong。
+//! 控制面：ClientHello → Auth → ChannelSync → 频道结构 / 进频道 → UserJoined/Left → Ping/Pong。
 //!
-//! **先不做**：Whisper、多频道监听、管理操作、频道增删（这些消息在 proto 里有号，但这里只忽略并计数）。
+//! **先不做**：Whisper、多频道监听（这些消息在 proto 里有号，但这里只忽略并计数）。
 //!
 //! 这一层同样是 sans-io：吃一条 {@ControlMessage@}，吐一串 {@Action@}（发给谁、发什么、
 //! 要不要关连接）。真正的 TCP + TLS 在传输层，测试里就是一个 `Vec`。
@@ -10,7 +10,7 @@ use protocol::control::proto::control_message::Kind;
 use protocol::{ControlMessage, PROTOCOL_VERSION, caps};
 
 use crate::auth::AuthMethod;
-use crate::channel::{ChannelId, UserId};
+use crate::channel::{Channel, ChannelId, FLAG_CONTAINER, UserId};
 use crate::perms;
 use crate::session::{SessionId, SessionState};
 use crate::{Server, Session};
@@ -76,6 +76,37 @@ fn error_reply(request_id: u64, code: pb::ErrorCode, message: &str) -> ControlMe
     )
 }
 
+/// 频道名最长多少个**字符**（不是字节：中文频道名 32 个字绰绰有余）。
+const MAX_CHANNEL_NAME: usize = 32;
+/// 单频道人数上限的合法上界（0 表示用服务器默认）。
+const MAX_CHANNEL_USERS: u32 = 1024;
+/// 频道树最大深度，根级算第 1 层。与 UI 的 `buildTree(maxDepth = 3)` 对齐。
+const MAX_CHANNEL_DEPTH: u32 = 3;
+/// 认得的 `flags` 位：1=临时 2=需要密码 4=只允许监听 8=分组。
+///
+/// 不认识的位**丢掉而不是报错**：将来加位时旧服务器会安静地忽略它，
+/// 比让一次改名因为「多了个未知位」而失败要好。
+const KNOWN_CHANNEL_FLAGS: u64 = 0b1111;
+
+/// 校验并规范化频道名。
+fn clean_channel_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("频道名不能为空".to_owned());
+    }
+    if name.chars().count() > MAX_CHANNEL_NAME {
+        return Err(format!("频道名最长 {MAX_CHANNEL_NAME} 个字符"));
+    }
+    // `/` 会被客户端当成「频道路径」的暗示，而 v1 的频道没有路径这个概念。
+    if name.contains('/') {
+        return Err("频道名里不能有 /".to_owned());
+    }
+    if name.chars().any(char::is_control) {
+        return Err("频道名里不能有控制字符".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
 impl Server {
     /// 处理一条控制面消息。
     ///
@@ -121,6 +152,10 @@ impl Server {
             Some(Kind::KickUser(req)) => self.on_kick_user(session_id, request_id, req),
             Some(Kind::ListUsers(_)) => self.on_list_users(session_id, request_id),
             Some(Kind::SetUserPerms(req)) => self.on_set_user_perms(session_id, request_id, req),
+            Some(Kind::CreateChannel(req)) => self.on_create_channel(session_id, request_id, req),
+            Some(Kind::UpdateChannel(req)) => self.on_update_channel(session_id, request_id, req),
+            Some(Kind::MoveChannel(req)) => self.on_move_channel(session_id, request_id, req),
+            Some(Kind::DeleteChannel(req)) => self.on_delete_channel(session_id, request_id, req),
             Some(Kind::Ping(ping)) => vec![Action::send(
                 session_id,
                 envelope(request_id, Kind::Pong(pb::Pong { ts_us: ping.ts_us })),
@@ -1010,6 +1045,432 @@ impl Server {
                     ),
                 ));
             }
+        }
+        actions
+    }
+
+    // ------------------------------------------------------------ 频道结构（P7-2）
+
+    /// 把一条频道消息发给所有就绪会话。
+    ///
+    /// 频道树是**全局**的：任何结构变化都要让所有人看到，而不是只告诉「相关的人」。
+    /// 一个只在 A 频道的人也必须知道 B 频道被改名了，否则他下次看到的树是旧的。
+    fn broadcast_channel_msg(&self, kind: &Kind) -> Vec<Action> {
+        self.sessions_ready()
+            .map(|session| Action::send(session.id, envelope(0, kind.clone())))
+            .collect()
+    }
+
+    /// 结构改动之后的收尾：计数、记事件、落盘。
+    ///
+    /// 返回 `Some(提示)` 表示**改动已经在内存里生效，但没能写进磁盘**。这种情况下
+    /// 服务器照常广播（别的客户端看到的应该是最新的树），同时给发起者一条明确的提示 ——
+    /// 而不是假装成功，让「重启之后改动没了」变成一个无法解释的现象。
+    fn note_channel_change(&mut self, channel: ChannelId, action: &'static str) -> Option<String> {
+        self.metrics_mut().channel_changes += 1;
+        self.emit(crate::Event::ChannelChanged { channel, action });
+        self.persist_channels()
+            .err()
+            .map(|error| format!("频道改动已生效，但没能写进磁盘（重启会丢）：{error}"))
+    }
+
+    /// 同级里有没有重名（`ignore` 是自己，改名时要排掉）。
+    fn sibling_name_taken(&self, parent: ChannelId, name: &str, ignore: Option<ChannelId>) -> bool {
+        let lowered = name.to_lowercase();
+        self.channels().values().any(|channel| {
+            channel.parent == parent
+                && Some(channel.id) != ignore
+                && channel.name.to_lowercase() == lowered
+        })
+    }
+
+    /// 按给定顺序把兄弟的 `position` 重排成 0..n-1（顺手把 `parent` 也写上）。
+    fn renumber(&mut self, parent: ChannelId, order: &[ChannelId]) {
+        for (index, id) in order.iter().enumerate() {
+            if let Some(channel) = self.channels.get_mut(id) {
+                channel.parent = parent;
+                channel.position = index as u32;
+            }
+        }
+    }
+
+    /// 新建频道。需要 `CREATE_CHANNEL`。
+    fn on_create_channel(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::CreateChannel,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::CREATE_CHANNEL) {
+            return actions;
+        }
+        let name = match clean_channel_name(&req.name) {
+            Ok(name) => name,
+            Err(message) => {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(request_id, pb::ErrorCode::InvalidArgument, &message),
+                )];
+            }
+        };
+        if req.parent_id != 0 {
+            if self.channel(req.parent_id).is_none() {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(request_id, pb::ErrorCode::ChannelNotFound, "父频道不存在"),
+                )];
+            }
+            if self.depth_of(req.parent_id) >= MAX_CHANNEL_DEPTH {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(
+                        request_id,
+                        pb::ErrorCode::InvalidArgument,
+                        &format!("频道树最多 {MAX_CHANNEL_DEPTH} 层，这个位置已经到底了"),
+                    ),
+                )];
+            }
+        }
+        if self.sibling_name_taken(req.parent_id, &name, None) {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Conflict,
+                    &format!("同级已经有叫「{name}」的频道了"),
+                ),
+            )];
+        }
+        if req.max_users > MAX_CHANNEL_USERS {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::InvalidArgument,
+                    &format!("人数上限最多 {MAX_CHANNEL_USERS}"),
+                ),
+            )];
+        }
+
+        let mut channel = Channel::new(0, req.parent_id, name);
+        channel.flags = req.flags & KNOWN_CHANNEL_FLAGS;
+        channel.max_users = req.max_users;
+        channel.position = self.children_of(req.parent_id).len() as u32;
+        let id = self.insert_channel(channel);
+        let warning = self.note_channel_change(id, "create");
+
+        let mut actions = Vec::new();
+        if let Some(state) = self.channel_state(id) {
+            actions.extend(
+                self.broadcast_channel_msg(&Kind::ChannelAdded(pb::ChannelAdded {
+                    channel: Some(state),
+                })),
+            );
+        }
+        if let Some(message) = warning {
+            actions.push(Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::Internal, &message),
+            ));
+        }
+        actions
+    }
+
+    /// 改名 / 人数上限 / 标志位。需要 `MANAGE_CHANNEL`。
+    fn on_update_channel(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::UpdateChannel,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::MANAGE_CHANNEL) {
+            return actions;
+        }
+        let Some(existing) = self.channel(req.channel_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::ChannelNotFound, "频道不存在"),
+            )];
+        };
+        let parent = existing.parent;
+        let was_container = existing.is_container();
+        let occupied = existing.members.len();
+
+        let mut name = None;
+        if let Some(raw) = &req.name {
+            let cleaned = match clean_channel_name(raw) {
+                Ok(cleaned) => cleaned,
+                Err(message) => {
+                    return vec![Action::send(
+                        session_id,
+                        error_reply(request_id, pb::ErrorCode::InvalidArgument, &message),
+                    )];
+                }
+            };
+            if self.sibling_name_taken(parent, &cleaned, Some(req.channel_id)) {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(
+                        request_id,
+                        pb::ErrorCode::Conflict,
+                        &format!("同级已经有叫「{cleaned}」的频道了"),
+                    ),
+                )];
+            }
+            name = Some(cleaned);
+        }
+        if let Some(max_users) = req.max_users
+            && max_users > MAX_CHANNEL_USERS
+        {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::InvalidArgument,
+                    &format!("人数上限最多 {MAX_CHANNEL_USERS}"),
+                ),
+            )];
+        }
+        // 设成分组之前必须没人：分组不可加入，里面挂着人就变成「幽灵成员」——
+        // 他们既不在任何能进的频道里，也没人能看见他们。
+        if let Some(flags) = req.flags {
+            let becoming_container = flags & FLAG_CONTAINER != 0 && !was_container;
+            if becoming_container && occupied > 0 {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(
+                        request_id,
+                        pb::ErrorCode::Conflict,
+                        &format!("频道里还有 {occupied} 个人，先把人移到别的频道再设成分组"),
+                    ),
+                )];
+            }
+        }
+
+        if let Some(channel) = self.channel_mut(req.channel_id) {
+            if let Some(name) = name {
+                channel.name = name;
+            }
+            if let Some(max_users) = req.max_users {
+                channel.max_users = max_users;
+            }
+            if let Some(flags) = req.flags {
+                channel.flags = flags & KNOWN_CHANNEL_FLAGS;
+            }
+        }
+        let warning = self.note_channel_change(req.channel_id, "update");
+
+        let mut actions = Vec::new();
+        if let Some(state) = self.channel_state(req.channel_id) {
+            actions.extend(
+                self.broadcast_channel_msg(&Kind::ChannelUpdated(pb::ChannelUpdated {
+                    channel: Some(state),
+                })),
+            );
+        }
+        if let Some(message) = warning {
+            actions.push(Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::Internal, &message),
+            ));
+        }
+        actions
+    }
+
+    /// 移动 / 排序。需要 `MANAGE_CHANNEL`。
+    ///
+    /// 「插在第几位」由前端算好（拖拽落点判定在 UI 里做），服务器只负责：
+    /// 防成环、深度不超、`position` 夹到合法范围、两个父级的顺序在**一次落盘**里重排。
+    fn on_move_channel(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::MoveChannel,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::MANAGE_CHANNEL) {
+            return actions;
+        }
+        let Some(existing) = self.channel(req.channel_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::ChannelNotFound, "频道不存在"),
+            )];
+        };
+        let old_parent = existing.parent;
+        if req.parent_id != 0 && self.channel(req.parent_id).is_none() {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::ChannelNotFound,
+                    "目标父频道不存在",
+                ),
+            )];
+        }
+        if req.parent_id == req.channel_id {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::InvalidArgument,
+                    "不能把频道移到自己里面",
+                ),
+            )];
+        }
+        // 防成环：目标不能是自己的子孙（含自己，上面那条已经挡了）。
+        if req.parent_id != 0 && self.is_within(req.parent_id, req.channel_id) {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::InvalidArgument,
+                    "不能把频道移到自己的子频道里",
+                ),
+            )];
+        }
+        let target_depth = if req.parent_id == 0 {
+            1
+        } else {
+            self.depth_of(req.parent_id) + 1
+        };
+        let height = self.subtree_height(req.channel_id);
+        let deepest = target_depth + height - 1;
+        if deepest > MAX_CHANNEL_DEPTH {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::InvalidArgument,
+                    &format!("移过去会有 {deepest} 层，最多 {MAX_CHANNEL_DEPTH} 层"),
+                ),
+            )];
+        }
+
+        // 落点：先按「不含自己」的兄弟算，越界就夹到末尾。
+        let mut order: Vec<ChannelId> = self
+            .children_of(req.parent_id)
+            .into_iter()
+            .filter(|id| *id != req.channel_id)
+            .collect();
+        let position = (req.position as usize).min(order.len());
+        order.insert(position, req.channel_id);
+        if let Some(channel) = self.channel_mut(req.channel_id) {
+            channel.parent = req.parent_id;
+        }
+        self.renumber(req.parent_id, &order);
+        if old_parent != req.parent_id {
+            let old_order = self.children_of(old_parent);
+            self.renumber(old_parent, &old_order);
+        }
+        let warning = self.note_channel_change(req.channel_id, "move");
+
+        // 广播受影响的每一个频道：客户端按 id 覆盖，所以兄弟的 position 变化也要发，
+        // 否则它那边的顺序会和服务器的顺序不一致。
+        let mut affected: Vec<ChannelId> = order.clone();
+        if old_parent != req.parent_id {
+            affected.extend(self.children_of(old_parent));
+        }
+        affected.sort_unstable();
+        affected.dedup();
+        let mut actions = Vec::new();
+        for id in affected {
+            if let Some(state) = self.channel_state(id) {
+                actions.extend(self.broadcast_channel_msg(&Kind::ChannelUpdated(
+                    pb::ChannelUpdated {
+                        channel: Some(state),
+                    },
+                )));
+            }
+        }
+        if let Some(message) = warning {
+            actions.push(Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::Internal, &message),
+            ));
+        }
+        actions
+    }
+
+    /// 删除频道（连同子树）。需要 `MANAGE_CHANNEL`。
+    fn on_delete_channel(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::DeleteChannel,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::MANAGE_CHANNEL) {
+            return actions;
+        }
+        let Some(existing) = self.channel(req.channel_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::ChannelNotFound, "频道不存在"),
+            )];
+        };
+        let parent = existing.parent;
+        let doomed = self.subtree_of(req.channel_id);
+        let occupied: usize = doomed
+            .iter()
+            .filter_map(|id| self.channel(*id))
+            .map(|channel| channel.members.len())
+            .sum();
+        // 有人就拒绝，而不是静默把人挪走：那是权限系统里最容易挨骂的行为。
+        if occupied > 0 {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Conflict,
+                    &format!("这个频道里还有 {occupied} 个人，先把他们移到别的频道再删"),
+                ),
+            )];
+        }
+        let joinable_left = self
+            .channels()
+            .values()
+            .filter(|channel| !doomed.contains(&channel.id) && !channel.is_container())
+            .count();
+        if joinable_left == 0 {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Conflict,
+                    "这是最后一个能进的频道，删了就没地方说话了",
+                ),
+            )];
+        }
+
+        for id in &doomed {
+            self.channels.remove(id);
+        }
+        let order = self.children_of(parent);
+        self.renumber(parent, &order);
+        let warning = self.note_channel_change(req.channel_id, "delete");
+
+        let mut actions = Vec::new();
+        // 先发删除，再发兄弟的新位置：客户端按顺序处理，中间不会出现「顺序错了」的一瞬。
+        for id in &doomed {
+            actions.extend(
+                self.broadcast_channel_msg(&Kind::ChannelRemoved(pb::ChannelRemoved {
+                    channel_id: *id,
+                })),
+            );
+        }
+        for id in order {
+            if let Some(state) = self.channel_state(id) {
+                actions.extend(self.broadcast_channel_msg(&Kind::ChannelUpdated(
+                    pb::ChannelUpdated {
+                        channel: Some(state),
+                    },
+                )));
+            }
+        }
+        if let Some(message) = warning {
+            actions.push(Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::Internal, &message),
+            ));
         }
         actions
     }

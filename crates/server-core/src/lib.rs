@@ -22,6 +22,7 @@
 
 pub mod auth;
 pub mod channel;
+pub mod channel_store;
 pub mod control;
 pub mod events;
 pub mod metrics;
@@ -38,6 +39,7 @@ use transport::{EXPORTER_LEN, derive_voice_keys};
 
 pub use auth::{AuthMethod, AuthOutcome, Authenticator, UserAdmin, UserDb, UserEntry, UserRecord};
 pub use channel::{Channel, ChannelId, UserId};
+pub use channel_store::{ChannelRow, ChannelStore};
 pub use control::Action;
 pub use events::{Event, KillReason, MAX_EVENTS};
 pub use metrics::{DropReason, Metrics};
@@ -103,6 +105,8 @@ pub struct Server {
     /// 账号管理（列账号、改权限）。与认证器分开：登录要快，管理可以慢、可以失败。
     /// 没设的时候管理类请求一律回「这个服务器不支持管理操作」。
     user_admin: Option<Box<dyn UserAdmin>>,
+    /// 频道树的持久化。没设的时候结构改动只存在内存里（测试与临时服务器用）。
+    channel_store: Option<Box<dyn ChannelStore>>,
     sessions: BTreeMap<SessionId, Session>,
     by_addr: BTreeMap<SocketAddr, SessionId>,
     by_token: BTreeMap<[u8; VOICE_TOKEN_LEN], SessionId>,
@@ -146,6 +150,7 @@ impl Server {
             unbound_rate: RateMeter::new(config.max_voice_pps),
             authenticator: Box::new(UserDb::new()),
             user_admin: None,
+            channel_store: None,
             config,
             sessions: BTreeMap::new(),
             by_addr: BTreeMap::new(),
@@ -215,6 +220,132 @@ impl Server {
         self.user_admin.as_deref()
     }
 
+    /// 装一个频道树存储。
+    ///
+    /// 装完之后调用方要接着调 [`Server::restore_channels`]，否则库里那棵树不会进内存
+    /// （「装存储」和「读存储」分开，是因为读会失败，而构造 `Server` 不该失败）。
+    pub fn set_channel_store(&mut self, store: Box<dyn ChannelStore>) {
+        self.channel_store = Some(store);
+    }
+
+    /// 频道树存储。
+    #[must_use]
+    pub fn channel_store(&self) -> Option<&dyn ChannelStore> {
+        self.channel_store.as_deref()
+    }
+
+    /// 从存储里把频道树读进内存，返回读到了几个。
+    ///
+    /// 读之前先清空：这是「服务器启动」的语义，不是「合并」。返回 0 表示库里还没有频道
+    /// （全新部署），调用方可以按自己的默认值建几个。
+    pub fn restore_channels(&mut self) -> Result<usize, String> {
+        let Some(store) = self.channel_store() else {
+            return Ok(0);
+        };
+        let rows = store.load()?;
+        self.channels.clear();
+        self.next_channel_id = 1;
+        for row in &rows {
+            let mut channel = Channel::new(row.channel_id, row.parent_id, row.name.clone());
+            channel.position = row.position;
+            channel.max_users = row.max_users;
+            channel.flags = row.flags;
+            channel.description = row.description.clone();
+            self.insert_channel(channel);
+        }
+        Ok(rows.len())
+    }
+
+    /// 把内存里这棵树写回存储。没装存储时什么也不做（返回 `Ok`）。
+    pub fn persist_channels(&self) -> Result<(), String> {
+        let Some(store) = self.channel_store() else {
+            return Ok(());
+        };
+        let rows: Vec<ChannelRow> = self
+            .channels
+            .values()
+            .map(|c| ChannelRow {
+                channel_id: c.id,
+                parent_id: c.parent,
+                name: c.name.clone(),
+                position: c.position,
+                max_users: c.max_users,
+                flags: c.flags,
+                description: c.description.clone(),
+            })
+            .collect();
+        store.save(&rows)
+    }
+
+    /// 某个频道的直接子频道，按 `position` 排序（相同则按 id）。
+    #[must_use]
+    pub fn children_of(&self, parent: ChannelId) -> Vec<ChannelId> {
+        let mut children: Vec<&Channel> = self
+            .channels
+            .values()
+            .filter(|c| c.parent == parent)
+            .collect();
+        children.sort_by_key(|c| (c.position, c.id));
+        children.into_iter().map(|c| c.id).collect()
+    }
+
+    /// 一个频道连同它的整棵子树（先序）。不存在的 id 返回空表。
+    #[must_use]
+    pub fn subtree_of(&self, root: ChannelId) -> Vec<ChannelId> {
+        if !self.channels.contains_key(&root) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if out.contains(&id) {
+                // 坏数据（成环）不该让服务器死循环。
+                continue;
+            }
+            out.push(id);
+            stack.extend(self.children_of(id).into_iter().rev());
+        }
+        out
+    }
+
+    /// 从根数下来，这个频道在第几层（根级 = 1）。不存在返回 0。
+    #[must_use]
+    pub fn depth_of(&self, id: ChannelId) -> u32 {
+        let mut depth = 0;
+        let mut cursor = Some(id);
+        while let Some(current) = cursor {
+            let Some(channel) = self.channels.get(&current) else {
+                return 0;
+            };
+            depth += 1;
+            if channel.parent == 0 {
+                break;
+            }
+            // 防成环：走够频道总数还没到根，就当作坏数据。
+            if depth > self.channels.len() as u32 {
+                return 0;
+            }
+            cursor = Some(channel.parent);
+        }
+        depth
+    }
+
+    /// 这棵子树有多高（只有自己 = 1）。
+    #[must_use]
+    pub fn subtree_height(&self, root: ChannelId) -> u32 {
+        self.children_of(root)
+            .into_iter()
+            .map(|child| self.subtree_height(child))
+            .max()
+            .map_or(1, |height| height + 1)
+    }
+
+    /// `candidate` 是不是 `root` 的子孙（含自己）。
+    #[must_use]
+    pub fn is_within(&self, candidate: ChannelId, root: ChannelId) -> bool {
+        self.subtree_of(root).contains(&candidate)
+    }
+
     /// 配置。
     #[must_use]
     pub const fn config(&self) -> &ServerConfig {
@@ -232,12 +363,28 @@ impl Server {
         &mut self.metrics
     }
 
-    /// 建一个频道，返回 id。
+    /// 建一个频道（追加到同级末尾），返回 id。
     pub fn add_channel(&mut self, parent: ChannelId, name: impl Into<String>) -> ChannelId {
-        let id = self.next_channel_id;
-        self.next_channel_id += 1;
-        let mut channel = Channel::new(id, parent, name);
+        let position = self.children_of(parent).len() as u32;
+        let mut channel = Channel::new(0, parent, name);
+        channel.position = position;
+        self.insert_channel(channel)
+    }
+
+    /// 把一个已经填好的频道插进树里，返回 id。
+    ///
+    /// `id == 0` 表示「请发一个新号」；非 0 表示「这是从库里读回来的，id 必须原样保留」。
+    /// 两种调用都要经过这里，是为了让**发号只有一处**：`next_channel_id` 永远大于
+    /// 树里出现过的任何 id。
+    pub fn insert_channel(&mut self, mut channel: Channel) -> ChannelId {
+        if channel.id == 0 {
+            channel.id = self.next_channel_id;
+            self.next_channel_id += 1;
+        } else {
+            self.next_channel_id = self.next_channel_id.max(channel.id.saturating_add(1));
+        }
         channel.epoch = self.bump_epoch();
+        let id = channel.id;
         self.channels.insert(id, channel);
         id
     }

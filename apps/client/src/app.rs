@@ -990,6 +990,17 @@ impl<'a> App<'a> {
                     .collect();
                 host.accounts(&views);
             }
+            // 非致命的服务器错误（拒绝了一次操作）：界面上要看得见，否则用户只会觉得
+            // 「点了没反应」。致命的那些由 `write_actions` 转成会话结束。
+            if let ClientAction::ServerError {
+                message,
+                fatal: false,
+                ..
+            } = action
+                && let Some(host) = self.host
+            {
+                host.notice(message);
+            }
         }
         // 服务器确认了换频道：`ChannelSync` 里带着我的新 channel_id。
         if let Some(channel_id) = self.pending_join
@@ -1239,6 +1250,40 @@ impl<'a> App<'a> {
                 }
                 Command::SetUserPerms { user_id, perms } => {
                     let action = self.client.set_user_perms(user_id, perms);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::CreateChannel {
+                    parent_id,
+                    name,
+                    flags,
+                    max_users,
+                } => {
+                    let action = self
+                        .client
+                        .create_channel(parent_id, &name, flags, max_users);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::UpdateChannel {
+                    channel_id,
+                    name,
+                    max_users,
+                    flags,
+                } => {
+                    let action =
+                        self.client
+                            .update_channel(channel_id, name.as_deref(), max_users, flags);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::MoveChannel {
+                    channel_id,
+                    parent_id,
+                    position,
+                } => {
+                    let action = self.client.move_channel(channel_id, parent_id, position);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::DeleteChannel { channel_id } => {
+                    let action = self.client.delete_channel(channel_id);
                     write_actions(writer, vec![action]).await?;
                 }
                 Command::Disconnect => self.quit = true,

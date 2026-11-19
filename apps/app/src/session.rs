@@ -50,6 +50,13 @@ pub enum Event {
         /// 全部账号（含离线的）。
         accounts: Vec<AccountView>,
     },
+    /// 一条非致命提示（服务器拒绝了一次操作 / 请求超时）。
+    ///
+    /// 与 `phase = error` 分开：那条表示会话没了，这条表示「这件事没做成，还能继续用」。
+    Notice {
+        /// 给用户看的一句话。
+        message: String,
+    },
 }
 
 /// 会话与前端之间的桥：一个通道往外推，一个队列往里拉。
@@ -92,6 +99,12 @@ impl Host for HostRef {
     fn accounts(&self, accounts: &[AccountView]) {
         let _ = self.0.events.send(Event::Accounts {
             accounts: accounts.to_vec(),
+        });
+    }
+
+    fn notice(&self, message: &str) {
+        let _ = self.0.events.send(Event::Notice {
+            message: message.to_owned(),
         });
     }
 

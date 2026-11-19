@@ -1,9 +1,13 @@
-//! 服务器侧的账号表。
+//! 服务器侧的库：账号表 + 频道树。
 //!
 //! ```sql
 //! users(user_id, username UNIQUE, password_hash, perms, anonymous, created_at)
 //! devices(token_hash BLOB PRIMARY KEY, user_id REFERENCES users)
+//! channels(channel_id, parent_id, name, position, max_users, flags, description, created_at)
 //! ```
+//!
+//! 三张表共处**一个**库文件：它们同属「服务器自己的状态」，备份就是拷一个文件。
+//! 频道表的读写细节在 [`crate::channels`]，这里只负责开库、建表与迁移。
 //!
 //! # 为什么要 `devices` 这张表
 //!
@@ -15,6 +19,12 @@
 //!
 //! 它要能被查询（「最多允许多少个匿名号」），而权限位是给业务判断用的。
 //! 把两件事塞进一个整数里，迟早会有人用错掩码。
+//!
+//! # 库结构版本
+//!
+//! v1 = 账号 + 设备绑定；v2 = 加了 `channels`（P7-2）。迁移是**只加表**：
+//! 所有语句都是 `CREATE TABLE IF NOT EXISTS`，所以 v1 的库打开后自动变成 v2，
+//! 老账号一条都不动。
 
 use std::path::Path;
 
@@ -23,7 +33,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::{StoreError, open_database};
 
 /// 库结构版本。加字段就 +1 并在 [`SCHEMA`] 里写清迁移。
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -38,6 +48,18 @@ CREATE TABLE IF NOT EXISTS devices (
     token_hash BLOB    PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     last_seen  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+-- v2（P7-2）：频道树。channel_id 由服务器发号并**显式写回**，所以不用 AUTOINCREMENT：
+-- 发号只有一个来源（服务器的计数器），否则「读出来再插回去」会换 id。
+CREATE TABLE IF NOT EXISTS channels (
+    channel_id  INTEGER PRIMARY KEY,
+    parent_id   INTEGER NOT NULL DEFAULT 0,
+    name        TEXT    NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0,
+    max_users   INTEGER NOT NULL DEFAULT 0,
+    flags       INTEGER NOT NULL DEFAULT 0,
+    description TEXT    NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 ";
 
@@ -56,13 +78,13 @@ pub struct UserRow {
     pub anonymous: bool,
 }
 
-/// 账号表。
+/// 服务器侧的库。
 #[derive(Debug)]
-pub struct UserStore {
+pub struct ServerStore {
     conn: rusqlite::Connection,
 }
 
-impl UserStore {
+impl ServerStore {
     /// 打开（必要时新建）一个库文件。
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Ok(Self {
@@ -75,6 +97,12 @@ impl UserStore {
         let conn = rusqlite::Connection::open_in_memory()?;
         crate::migrate(&conn, SCHEMA, VERSION)?;
         Ok(Self { conn })
+    }
+
+    /// 频道树的读写句柄（借同一条连接）。
+    #[must_use]
+    pub const fn channels(&self) -> crate::channels::Channels<'_> {
+        crate::channels::Channels::new(&self.conn)
     }
 
     /// 按用户名查。
@@ -258,8 +286,8 @@ fn row_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRow> {
 mod tests {
     use super::*;
 
-    fn store() -> UserStore {
-        UserStore::open_memory().expect("内存库")
+    fn store() -> ServerStore {
+        ServerStore::open_memory().expect("内存库")
     }
 
     #[test]
@@ -336,5 +364,60 @@ mod tests {
         conn.execute_batch("PRAGMA user_version = 99").unwrap();
         let err = crate::migrate(&conn, SCHEMA, VERSION).unwrap_err();
         assert!(err.to_string().contains("v99"), "报错要说清楚版本：{err}");
+    }
+
+    /// v1 的库（只有账号表）升上来之后：账号还在、频道表被建出来、版本号是 2。
+    ///
+    /// 这条测试守的是「老服务器装上新程序还能用」——迁移里任何一个
+    /// `DROP` / `ALTER` 都会让它红。
+    #[test]
+    fn a_v1_database_gains_the_channel_table_without_losing_accounts() {
+        const V1: &str = "
+        CREATE TABLE users (
+            user_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT    NOT NULL UNIQUE,
+            password_hash TEXT    NOT NULL DEFAULT '',
+            perms         INTEGER NOT NULL DEFAULT 1,
+            anonymous     INTEGER NOT NULL DEFAULT 0,
+            created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE TABLE devices (
+            token_hash BLOB    PRIMARY KEY,
+            user_id    INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            last_seen  INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        ";
+        let path = std::env::temp_dir().join(format!(
+            "hushsquad-store-v1-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).expect("建 v1 库");
+            conn.execute_batch(V1).expect("v1 结构");
+            conn.execute_batch("PRAGMA user_version = 1").expect("版本");
+            conn.execute(
+                "INSERT INTO users (username, password_hash, perms) VALUES ('alice', 'h', 255)",
+                [],
+            )
+            .expect("老账号");
+        }
+
+        let store = ServerStore::open(&path).expect("打开老库");
+        let alice = store.find("alice").expect("查").expect("老账号必须还在");
+        assert_eq!(alice.perms, 255);
+        assert!(
+            store.channels().load().expect("读频道").is_empty(),
+            "新表应当是空的，而不是报错"
+        );
+
+        let conn = rusqlite::Connection::open(&path).expect("再开一次读版本");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读版本");
+        assert_eq!(version, 2);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 }

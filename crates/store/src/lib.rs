@@ -4,8 +4,10 @@
 //!
 //! | 模块 | 谁用 | 存什么 |
 //! |---|---|---|
-//! | [`users`] | 服务器 | 账号（用户名 + argon2id PHC 串 + 权限）与设备 token 摘要 |
+//! | [`server`] | 服务器 | 账号（用户名 + argon2id PHC 串 + 权限）、设备 token 摘要、频道树 |
 //! | [`client`] | 客户端 | 本机设备号、信任过的服务器证书指纹 |
+//!
+//! 频道树的读写单独在 [`channels`]（它借服务器库的那条连接）。
 //!
 //! # 这里只做存储，不做密码学
 //!
@@ -20,8 +22,9 @@
 
 #![deny(unsafe_code)]
 
+pub mod channels;
 pub mod client;
-pub mod users;
+pub mod server;
 
 use std::path::Path;
 

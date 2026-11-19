@@ -26,9 +26,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use server_core::auth::{AuthError, AuthMethod, AuthOutcome, Authenticator, UserAdmin, UserEntry};
+use server_core::channel_store::{ChannelRow, ChannelStore};
 
 use server_core::UserDb;
-use store::users::{UserRow, UserStore};
+use store::server::{ServerStore, UserRow};
 
 /// 下发/校验设备 token 的长度。128 位随机量，够用且短。
 pub const DEVICE_TOKEN_LEN: usize = 16;
@@ -37,7 +38,7 @@ pub const DEVICE_TOKEN_LEN: usize = 16;
 pub struct SqliteAuth {
     /// 存储层。`Authenticator::authenticate` 只拿 `&self`，而按设备号登录要写 `last_seen`，
     /// 所以里面套一层锁。临界区只有一条查询，8 人规模下从来不是瓶颈。
-    store: Mutex<UserStore>,
+    store: Mutex<ServerStore>,
     /// 是否允许「只凭设备号」新建账号。
     allow_anonymous: bool,
     /// 匿名账号上限。
@@ -57,7 +58,7 @@ impl core::fmt::Debug for SqliteAuth {
 impl SqliteAuth {
     /// 打开账号库。
     pub fn open(path: &Path, allow_anonymous: bool, max_anonymous: u32) -> Result<Self, String> {
-        let store = UserStore::open(path).map_err(|e| e.to_string())?;
+        let store = ServerStore::open(path).map_err(|e| e.to_string())?;
         Ok(Self {
             store: Mutex::new(store),
             allow_anonymous,
@@ -68,14 +69,14 @@ impl SqliteAuth {
     /// 用内存库构造（测试用）。
     pub fn in_memory(allow_anonymous: bool) -> Result<Self, String> {
         Ok(Self {
-            store: Mutex::new(UserStore::open_memory().map_err(|e| e.to_string())?),
+            store: Mutex::new(ServerStore::open_memory().map_err(|e| e.to_string())?),
             allow_anonymous,
             max_anonymous: 200,
         })
     }
 
     /// 直接拿到存储层（CLI 的 adduser / ls / del 用）。
-    pub fn with_store<T>(&self, f: impl FnOnce(&mut UserStore) -> T) -> T {
+    pub fn with_store<T>(&self, f: impl FnOnce(&mut ServerStore) -> T) -> T {
         let mut store = self.store.lock().expect("锁没中毒");
         f(&mut store)
     }
@@ -214,6 +215,51 @@ impl UserAdmin for SqliteAuth {
     }
 }
 
+/// 频道树的持久化：把 `server-core` 的行类型翻译成存储层的行类型。
+///
+/// 两个 `ChannelRow` 长得一样，但属于不同的层（`server-core` 不认识 SQLite，
+/// `store` 不认识服务器逻辑）。这里做一次翻译，比让其中一边依赖另一边便宜。
+impl ChannelStore for SqliteAuth {
+    fn load(&self) -> Result<Vec<ChannelRow>, String> {
+        self.with_store(|store| {
+            let rows = store.channels().load().map_err(|e| e.to_string())?;
+            Ok(rows
+                .into_iter()
+                .map(|row| ChannelRow {
+                    channel_id: row.channel_id,
+                    parent_id: row.parent_id,
+                    name: row.name,
+                    position: row.position,
+                    max_users: row.max_users,
+                    flags: row.flags,
+                    description: row.description,
+                })
+                .collect())
+        })
+    }
+
+    fn save(&self, rows: &[ChannelRow]) -> Result<(), String> {
+        let rows: Vec<store::channels::ChannelRow> = rows
+            .iter()
+            .map(|row| store::channels::ChannelRow {
+                channel_id: row.channel_id,
+                parent_id: row.parent_id,
+                name: row.name.clone(),
+                position: row.position,
+                max_users: row.max_users,
+                flags: row.flags,
+                description: row.description.clone(),
+            })
+            .collect();
+        self.with_store(|store| {
+            store
+                .channels()
+                .replace_all(&rows)
+                .map_err(|e| e.to_string())
+        })
+    }
+}
+
 // 服务器要同时拿到「认证器」和「账号管理」，而两者必须是**同一个**实例
 // （否则改完权限，认证读到的还是旧库）。用 `Arc` 共享，再包一层本地类型：
 // `Arc` 不是 fundamental 类型，直接 `impl Trait for Arc<SqliteAuth>` 会撞孤儿规则。
@@ -247,6 +293,16 @@ impl UserAdmin for SharedAuth {
 
     fn set_perms(&self, user_id: u32, perms: u64) -> Result<(), AuthError> {
         self.0.set_perms(user_id, perms)
+    }
+}
+
+impl ChannelStore for SharedAuth {
+    fn load(&self) -> Result<Vec<ChannelRow>, String> {
+        self.0.load()
+    }
+
+    fn save(&self, rows: &[ChannelRow]) -> Result<(), String> {
+        self.0.save(rows)
     }
 }
 

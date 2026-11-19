@@ -98,6 +98,7 @@ fn dispatch(config: Config) -> Result<(), String> {
         Command::DelUser(name) => delete_user(&config, &name),
         Command::Promote(name) => promote(&config, &name),
         Command::List => list_users(&config),
+        Command::Channels => list_channels(&config),
         Command::Cert => regenerate_cert(&config),
     }
 }
@@ -301,6 +302,55 @@ fn regenerate_cert(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// 打印库里那棵频道树（命令行版；图形客户端里能直接改）。
+fn list_channels(config: &Config) -> Result<(), String> {
+    let auth = open_store(config)?;
+    let rows = auth
+        .inner()
+        .with_store(|store| store.channels().load().map_err(|e| e.to_string()))?;
+    if rows.is_empty() {
+        println!("库里还没有频道。服务器下次启动时会按 --channel 建一批。");
+        return Ok(());
+    }
+    let mut by_parent: std::collections::BTreeMap<u32, Vec<&store::channels::ChannelRow>> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        by_parent.entry(row.parent_id).or_default().push(row);
+    }
+    for list in by_parent.values_mut() {
+        list.sort_by_key(|row| (row.position, row.channel_id));
+    }
+    // 递归打印。深度上限 3 层，但这里不假设数据是好的：走够 rows.len() 层就停。
+    fn walk(
+        by_parent: &std::collections::BTreeMap<u32, Vec<&store::channels::ChannelRow>>,
+        parent: u32,
+        depth: usize,
+        budget: usize,
+    ) {
+        if budget == 0 {
+            return;
+        }
+        for row in by_parent.get(&parent).into_iter().flatten() {
+            let indent = "  ".repeat(depth);
+            let kind = if row.flags & server_core::channel::FLAG_CONTAINER != 0 {
+                "［分组］"
+            } else {
+                ""
+            };
+            let cap = if row.max_users == 0 {
+                String::new()
+            } else {
+                format!("（上限 {} 人）", row.max_users)
+            };
+            println!("{indent}{} {kind}{}{cap}", row.position, row.name);
+            walk(by_parent, row.channel_id, depth + 1, budget - 1);
+        }
+    }
+    walk(&by_parent, 0, 0, rows.len() + 1);
+    println!("共 {} 个频道", rows.len());
+    Ok(())
+}
+
 /// 按配置跑起来，直到 Ctrl-C。
 pub fn run(config: Config) -> Result<(), String> {
     let auth = open_store(&config)?;
@@ -338,9 +388,18 @@ pub fn run(config: Config) -> Result<(), String> {
         // 认证器与账号管理必须是**同一个**实例：改完权限，认证读到的得是新库。
         server.set_authenticator(Box::new(auth.clone()));
         server.set_user_admin(Box::new(auth.clone()));
-        for name in &config.channels {
-            server.add_channel(0, name.clone());
-        }
+        // 频道树也走同一个库。先读，库里是空的才按 --channel 建一批（并立刻落盘）。
+        server.set_channel_store(Box::new(auth.clone()));
+        let restored = server.restore_channels()?;
+        let channel_note = if restored > 0 {
+            format!("{restored} 个（从库里读出来的）")
+        } else {
+            for name in &config.channels {
+                server.add_channel(0, name.clone());
+            }
+            server.persist_channels()?;
+            format!("{}（首次建库，已写进库）", config.channels.join("、"))
+        };
 
         let shared = Arc::new(Shared {
             server: Mutex::new(server),
@@ -362,7 +421,10 @@ pub fn run(config: Config) -> Result<(), String> {
             config.voice_bind
         );
         println!("  账号库    {}", config.db.display());
-        println!("  频道      {}", config.channels.join("、"));
+        println!("  频道      {channel_note}");
+        if restored > 0 && config.channels != vec!["大厅".to_owned()] {
+            println!("            （--channel 只在首次建库时生效，库里已经有频道了，本次忽略）");
+        }
         println!(
             "  匿名登录  {}",
             if config.allow_anonymous {

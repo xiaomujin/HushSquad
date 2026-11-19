@@ -21,6 +21,11 @@ message ControlMessage {
     ChannelAdded     channel_added     = 21;
     ChannelRemoved   channel_removed   = 22;
     ChannelUpdated   channel_updated   = 23;
+    // 25-28：频道结构的写操作（P7-2）。需要 PERM_CREATE_CHANNEL / PERM_MANAGE_CHANNEL。
+    CreateChannel    create_channel    = 25;
+    UpdateChannel    update_channel    = 26;
+    MoveChannel      move_channel      = 27;
+    DeleteChannel    delete_channel    = 28;
     JoinChannel      join_channel      = 30;
     LeaveChannel     leave_channel     = 31;
     UserJoined       user_joined       = 40;
@@ -177,6 +182,43 @@ message ChannelSync {
 message ChannelAdded   { ChannelState channel = 1; }
 message ChannelRemoved { uint32 channel_id = 1; }
 message ChannelUpdated { ChannelState channel = 1; }
+
+// ---------------------------- 频道结构写操作（P7-2） ----------------------------
+//
+// 服务器是单线程状态机，所以「两个管理员同时改」天然串行；但客户端仍然要按
+// 「广播到了才算数」处理（唯一例外是拖拽排序，它乐观更新，见设计文档 §6.5）。
+
+// 新建频道。需要 PERM_CREATE_CHANNEL。成功后向所有人广播 ChannelAdded。
+message CreateChannel {
+  uint32 parent_id = 1;   // 0 = 根
+  string name      = 2;   // 1-32 字符，去首尾空白，禁 '/' 与控制字符
+  uint64 flags     = 3;   // 只认已知位；bit3 = 分组（不可加入）
+  uint32 max_users = 4;   // 0 = 用服务器默认
+}
+
+// 改名字 / 人数上限 / 标志位。需要 PERM_MANAGE_CHANNEL。
+// 三个字段都是 optional：不填就是「不改」（proto3 的 optional 才有存在性）。
+message UpdateChannel {
+  uint32 channel_id        = 1;
+  optional string name     = 2;
+  optional uint32 max_users = 3;
+  optional uint64 flags    = 4;
+}
+
+// 移动 / 排序。需要 PERM_MANAGE_CHANNEL。
+//
+// 「插在第几位」由前端算成整数下标（拖拽的落点判定在 UI 里做），服务器只负责
+// 夹到合法范围、防成环、把新旧两个父级的 position 在一个事务里重排成 0..n-1。
+// 没有单独的 ReorderChannels 消息：一次拖拽就是一条 MoveChannel。
+message MoveChannel {
+  uint32 channel_id = 1;
+  uint32 parent_id  = 2;   // 0 = 根
+  uint32 position   = 3;   // 同级下标；超出范围夹到末尾
+}
+
+// 删除频道（连同子树）。需要 PERM_MANAGE_CHANNEL。
+// 频道里有人就拒绝 —— 静默把人挪走是权限系统里最容易挨骂的行为。
+message DeleteChannel { uint32 channel_id = 1; }
 
 message JoinChannel  { uint32 channel_id = 1; string password = 2; }
 message LeaveChannel { }

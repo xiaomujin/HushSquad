@@ -110,6 +110,11 @@ pub struct Metrics {
     pub permission_denied: u64,
     /// 被管理员踢出的会话数。
     pub kicks: u64,
+    /// 频道结构改动次数（新建 + 改名 + 移动 + 删除，一次请求算一次）。
+    ///
+    /// 它和 `permission_denied` 一起看：结构改动本该是低频事件，
+    /// 突然变高要么是有人在做批量整理，要么是有人在拿脚本刷。
+    pub channel_changes: u64,
     /// 各类丢弃原因的计数。
     dropped: [u64; DropReason::COUNT],
 }

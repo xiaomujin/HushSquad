@@ -406,6 +406,74 @@ impl Client {
         })
     }
 
+    /// 新建频道（需要 `CREATE_CHANNEL`）。服务器校验通过后向所有人广播 `ChannelAdded`。
+    pub fn create_channel(
+        &mut self,
+        parent_id: u32,
+        name: &str,
+        flags: u64,
+        max_users: u32,
+    ) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::CreateChannel(pb::CreateChannel {
+                parent_id,
+                name: name.to_owned(),
+                flags,
+                max_users,
+            })),
+        })
+    }
+
+    /// 改名 / 人数上限 / 标志位（需要 `MANAGE_CHANNEL`）。`None` 表示不改这一项。
+    pub fn update_channel(
+        &mut self,
+        channel_id: u32,
+        name: Option<&str>,
+        max_users: Option<u32>,
+        flags: Option<u64>,
+    ) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::UpdateChannel(pb::UpdateChannel {
+                channel_id,
+                name: name.map(str::to_owned),
+                max_users,
+                flags,
+            })),
+        })
+    }
+
+    /// 把频道移到另一个父级的第 `position` 位（需要 `MANAGE_CHANNEL`）。
+    ///
+    /// 「插在第几位」由前端算（拖拽落点判定在 UI 里），服务器只夹到合法范围。
+    pub fn move_channel(&mut self, channel_id: u32, parent_id: u32, position: u32) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::MoveChannel(pb::MoveChannel {
+                channel_id,
+                parent_id,
+                position,
+            })),
+        })
+    }
+
+    /// 删除频道（连同子树，需要 `MANAGE_CHANNEL`）。
+    pub fn delete_channel(&mut self, channel_id: u32) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::DeleteChannel(pb::DeleteChannel { channel_id })),
+        })
+    }
+
     /// 离开当前频道。
     pub fn leave_channel(&mut self) -> ClientAction {
         let request_id = self.next_request_id();

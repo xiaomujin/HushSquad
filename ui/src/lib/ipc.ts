@@ -162,6 +162,13 @@ export interface Handlers {
   /** 账号列表（管理面板请求之后来一次）。 */
   onAccounts: (accounts: Account[]) => void;
   onNet: (net: Net) => void;
+  /**
+   * 一条非致命提示（服务器拒绝了一次操作）。
+   *
+   * 它不是错误：连接还在、语音还在，只是这一次请求没被接受。所以界面上是
+   * 一条几秒后自己消失的提示条，而不是错误页。
+   */
+  onNotice: (message: string) => void;
 }
 
 /** 后端接口。Tauri 侧与浏览器侧的 Mock 实现同一份。 */
@@ -169,6 +176,14 @@ export interface Backend {
   connect(req: ConnectRequest): Promise<void>;
   disconnect(): Promise<void>;
   joinChannel(channelId: number): Promise<void>;
+  /** 新建频道（需要 PERM.CREATE_CHANNEL）。maxUsers = 0 表示用服务器默认。 */
+  createChannel(parentId: number, name: string, flags: number, maxUsers: number): Promise<void>;
+  /** 改名 / 人数上限 / 标志位（需要 PERM.MANAGE_CHANNEL）。patch 里没给的项表示不改。 */
+  updateChannel(channelId: number, patch: { name?: string; maxUsers?: number; flags?: number }): Promise<void>;
+  /** 把频道移到 parentId 下的第 position 位（需要 PERM.MANAGE_CHANNEL）。 */
+  moveChannel(channelId: number, parentId: number, position: number): Promise<void>;
+  /** 删除频道（连同子树，需要 PERM.MANAGE_CHANNEL）。 */
+  deleteChannel(channelId: number): Promise<void>;
   setVoice(settings: VoiceSettings): Promise<void>;
   /**
    * 按住 / 松开「强制发送」（Space）。
@@ -229,6 +244,10 @@ const CHANNELS: Channel[] = [
 
 const SELF = 1;
 
+/** 同级排序：与 `buildTree` 同一条规则（先 position，再名字）。 */
+const byPosition = (a: Channel, b: Channel): number =>
+  (a.position - b.position) || a.name.localeCompare(b.name);
+
 /**
  * 浏览器里的假后端：让 `pnpm dev` 不开 Tauri 也能看界面、点交互。
  *
@@ -236,6 +255,10 @@ const SELF = 1;
  */
 export class MockBackend implements Backend {
   #handlers: Handlers | null = null;
+  // 频道表是**实例**的：管理动作要真的改它，而模块级的 CHANNELS 是只读的初始值。
+  #channels: Channel[] = CHANNELS.map((c) => ({ ...c }));
+  #nextId = 100;
+  #selfChannel = 0;
   #members: Member[] = [];
   #levels: Record<number, number> = {};
   #meters: Meters = { talking: false, self_level: 0, tx: false, gate: false, vad: 0, frames_sent: 0, chain_ms: 10, levels: {} };
@@ -273,7 +296,7 @@ export class MockBackend implements Backend {
     // Mock 里自己是服主：这样评审时能看见管理面板与右键菜单。
     this.#handlers?.onPerms(511);
     this.#handlers?.onPhase('connected');
-    this.#handlers?.onChannels(CHANNELS, 0);
+    this.#handlers?.onChannels(this.#channels, 0);
     this.#handlers?.onMembers(this.#members, SELF);
     this.#handlers?.onNet(this.#net);
     this.#start();
@@ -289,9 +312,120 @@ export class MockBackend implements Backend {
     this.#handlers?.onPhase('joining');
     await sleep(120);
     for (const m of this.#members) if (m.user_id === SELF) m.channel_id = channelId;
+    this.#selfChannel = channelId;
     this.#handlers?.onPhase('in_channel');
-    this.#handlers?.onChannels(CHANNELS, channelId);
+    this.#handlers?.onChannels(this.#channels, channelId);
     this.#handlers?.onMembers(this.#members, SELF);
+  }
+
+  // 频道管理：Mock 真的改自己那份表并发 onChannels，所以浏览器里也能拖、能改名。
+  // 校验只做「服务器一定会拒绝的那几种」，用来演示 onNotice 这条路。
+  async createChannel(parentId: number, name: string, flags: number, maxUsers: number): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 32) {
+      this.#handlers?.onNotice('频道名不能为空，且不超过 32 个字');
+      return;
+    }
+    if (parentId !== 0 && !this.#channels.some((c) => c.id === parentId)) {
+      this.#handlers?.onNotice('父频道不存在');
+      return;
+    }
+    const channel: Channel = {
+      id: this.#nextId++,
+      parent: parentId,
+      name: trimmed,
+      // 追加到末尾：新频道出现在最后一行的位置，用户不用去找。
+      position: this.#channels.filter((c) => c.parent === parentId).length,
+      max_users: Math.max(0, Math.round(maxUsers)),
+      flags,
+      members: 0,
+    };
+    this.#channels = [...this.#channels, channel];
+    this.#pushChannels();
+  }
+
+  async updateChannel(
+    channelId: number,
+    patch: { name?: string; maxUsers?: number; flags?: number },
+  ): Promise<void> {
+    if (!this.#channels.some((c) => c.id === channelId)) {
+      this.#handlers?.onNotice('频道不存在');
+      return;
+    }
+    const trimmed = patch.name?.trim();
+    if (patch.name !== undefined && (!trimmed || trimmed.length > 32)) {
+      this.#handlers?.onNotice('频道名不能为空，且不超过 32 个字');
+      return;
+    }
+    // 每次都给新对象：镜像靠「引用变了」才会重渲染，原地改字段是看不见的。
+    this.#channels = this.#channels.map((c) => {
+      if (c.id !== channelId) return c;
+      return {
+        ...c,
+        name: trimmed ?? c.name,
+        max_users: patch.maxUsers === undefined ? c.max_users : Math.max(0, Math.round(patch.maxUsers)),
+        flags: patch.flags ?? c.flags,
+      };
+    });
+    this.#pushChannels();
+  }
+
+  async moveChannel(channelId: number, parentId: number, position: number): Promise<void> {
+    const moved = this.#channels.find((c) => c.id === channelId);
+    if (!moved) {
+      this.#handlers?.onNotice('频道不存在');
+      return;
+    }
+    if (parentId === channelId || this.#isDescendant(parentId, channelId)) {
+      this.#handlers?.onNotice('不能把频道挪进它自己的子树');
+      return;
+    }
+    // 先按服务器会看到的样子算出新顺序（去掉被拖者，再插到 position），
+    // 然后整段重排 position——不然会和兄弟撞号，界面顺序取决于名字。
+    const siblings = this.#channels.filter((c) => c.parent === parentId && c.id !== channelId).sort(byPosition);
+    const at = Math.max(0, Math.min(Math.round(position), siblings.length));
+    siblings.splice(at, 0, moved);
+    const order = new Map<number, number>(siblings.map((c, index) => [c.id, index]));
+    this.#channels = this.#channels.map((c) => {
+      if (c.id === channelId) return { ...c, parent: parentId, position: order.get(c.id) ?? 0 };
+      return order.has(c.id) ? { ...c, position: order.get(c.id) ?? c.position } : c;
+    });
+    this.#pushChannels();
+  }
+
+  async deleteChannel(channelId: number): Promise<void> {
+    if (!this.#channels.some((c) => c.id === channelId)) {
+      this.#handlers?.onNotice('频道不存在');
+      return;
+    }
+    // 连同子树：反复扫一遍，直到没有新的子孙被收进来（频道表很小，不值得建索引）。
+    const doomed = new Set<number>([channelId]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const c of this.#channels) {
+        if (doomed.has(c.id) || !doomed.has(c.parent)) continue;
+        doomed.add(c.id);
+        grew = true;
+      }
+    }
+    this.#channels = this.#channels.filter((c) => !doomed.has(c.id));
+    this.#pushChannels();
+  }
+
+  #pushChannels(): void {
+    this.#handlers?.onChannels(this.#channels, this.#selfChannel);
+  }
+
+  /** `id` 是不是 `ancestor` 的子孙（含 `ancestor` 本身）。 */
+  #isDescendant(id: number, ancestor: number): boolean {
+    const seen = new Set<number>();
+    let current = this.#channels.find((c) => c.id === id);
+    while (current && !seen.has(current.id)) {
+      if (current.id === ancestor) return true;
+      seen.add(current.id);
+      current = this.#channels.find((c) => c.id === current?.parent);
+    }
+    return false;
   }
 
   async setVoice(settings: VoiceSettings): Promise<void> {
