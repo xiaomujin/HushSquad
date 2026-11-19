@@ -105,7 +105,7 @@ async fn handle(
     let session_id = {
         let mut server = shared.server.lock().expect("锁没中毒");
         server
-            .open_session("", voice_token)
+            .open_session("", voice_token, now_ms())
             .ok_or("服务器已满（max_sessions）")?
     };
     shared

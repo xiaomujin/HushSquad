@@ -125,6 +125,10 @@ impl Server {
         if session.state == SessionState::Closed {
             return Vec::new();
         }
+        // 活着的证据：这条会话刚刚发了东西。回收靠它（`Server::sweep_idle`）。
+        if let Some(session) = self.session_mut(session_id) {
+            session.last_seen_ms = now_ms;
+        }
 
         // 限速：超速只回一条 RATE_LIMITED，不断连接（断连接会让一次突发变成掉线）。
         let allowed = self

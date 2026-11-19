@@ -16,7 +16,9 @@ fn kind_of(msg: &protocol::ControlMessage) -> &'static str {
 #[test]
 fn handshake_returns_server_hello_then_auth_result_then_channel_sync() {
     let mut s = server();
-    let id = s.open_session("alice", [1u8; 16]).expect("会话已满");
+    let id = s
+        .open_session("alice", [1u8; 16], common::NOW)
+        .expect("会话已满");
 
     let hello = protocol::ControlMessage {
         protocol: 1,
@@ -102,7 +104,7 @@ fn identity_comes_from_the_user_table_not_the_connection_order() {
 #[test]
 fn an_unsupported_version_closes_the_connection() {
     let mut s = server();
-    let id = s.open_session("alice", [1u8; 16]).unwrap();
+    let id = s.open_session("alice", [1u8; 16], common::NOW).unwrap();
     let hello = protocol::ControlMessage {
         protocol: 1,
         request_id: 1,
@@ -122,7 +124,7 @@ fn an_unsupported_version_closes_the_connection() {
 #[test]
 fn a_bad_password_closes_the_connection() {
     let mut s = server();
-    let id = s.open_session("alice", [1u8; 16]).unwrap();
+    let id = s.open_session("alice", [1u8; 16], common::NOW).unwrap();
     s.handle_control(
         id,
         protocol::ControlMessage {

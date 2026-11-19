@@ -98,6 +98,8 @@ pub struct Metrics {
     pub sessions_closed: u64,
     /// 因为连续认证失败被强制断开的会话数。
     pub sessions_killed_bad_tag: u64,
+    /// 因为太久没收到任何东西被回收的会话数（半开连接、进程被强杀）。
+    pub sessions_reaped: u64,
     /// 收到的控制面消息数。
     pub control_msgs: u64,
     /// 被控制面限速拒绝的消息数。

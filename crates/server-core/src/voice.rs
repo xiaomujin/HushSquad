@@ -139,6 +139,8 @@ impl Server {
             let Some(session) = self.sessions.get_mut(&session_id) else {
                 return Outcome::Dropped(DropReason::Unbound);
             };
+            // 收到包就是活着的证据，放在限速之前：被限速的包也证明这条会话有人。
+            session.last_seen_ms = now_ms;
             if !session.voice_rate.allow(now_ms) {
                 return Outcome::Dropped(DropReason::RateLimited);
             }

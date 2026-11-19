@@ -455,6 +455,7 @@ impl Server {
         &mut self,
         name: impl Into<String>,
         voice_token: [u8; VOICE_TOKEN_LEN],
+        now_ms: u64,
     ) -> Option<SessionId> {
         if self.sessions.len() >= self.config.max_sessions {
             return None;
@@ -486,6 +487,7 @@ impl Server {
             server_seq: 0,
             control_rate: RateMeter::new(self.config.max_control_msgs_per_sec),
             voice_rate: RateMeter::new(self.config.max_voice_pps),
+            last_seen_ms: now_ms,
         };
         self.sessions.insert(id, session);
         self.by_token.insert(voice_token, id);
@@ -523,6 +525,37 @@ impl Server {
             self.metrics.sessions_closed += 1;
             self.emit(Event::SessionClosed { session: id });
         }
+    }
+
+    /// 回收「连接还在、人已经不在了」的会话。返回回收了几个。
+    ///
+    /// 判据只有一条：**超过 `ping_timeout_ms` 没有收到这条会话的任何东西**（控制消息或
+    /// 语音包）。这个阈值本来就是下发给客户端的 `Limits::ping_timeout_ms`，现在服务器
+    /// 自己也照它执行——承诺与执行用同一个数，免得「客户端以为 45 秒后会断，服务器却
+    /// 永远留着」。
+    ///
+    /// 为什么必须有这一条：TCP 的 EOF 只覆盖「对端正常关」和「RST 送到」两种情况。
+    /// 进程被强杀而 RST 丢在路上的、网线被拔的、NAT 表被清的，连接会一直是 ESTABLISHED，
+    /// 服务器什么都不做就一直留着那条会话——**同一台设备重连时就会撞上它**（C-54 的
+    /// 现象：握手成功、进频道成功，然后一个字节都收不到）。
+    ///
+    /// 注意这是**粗粒度**的兜底：正常退出靠 EOF 立刻回收，这里只处理异常。
+    pub fn sweep_idle(&mut self, now_ms: u64) -> usize {
+        let timeout = u64::from(self.config.limits.ping_timeout_ms);
+        let stale: Vec<SessionId> = self
+            .sessions
+            .values()
+            .filter(|session| {
+                session.state != SessionState::Closed
+                    && now_ms.saturating_sub(session.last_seen_ms) > timeout
+            })
+            .map(|session| session.id)
+            .collect();
+        for id in &stale {
+            self.close_session(*id);
+        }
+        self.metrics.sessions_reaped += stale.len() as u64;
+        stale.len()
     }
 
     /// 把会话放进某个频道（不检查容量，那是 control 层的事）。

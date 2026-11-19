@@ -34,6 +34,9 @@ pub use auth::{SharedAuth, SqliteAuth};
 use config::{Command, Config};
 use server_core::{Server, UserDb};
 
+/// 僵尸会话回收的节拍（见 `Server::sweep_idle`）。
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
 /// 毫秒时钟。全服务器共用一个，方便把日志和指标对上。
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -454,11 +457,24 @@ pub fn run(config: Config) -> Result<(), String> {
 async fn metrics_loop(shared: Arc<Shared>, control: tokio::task::JoinHandle<()>) {
     let mut ticker = tokio::time::interval(shared.metrics_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 僵尸会话回收的节拍。5 秒一次：阈值是 45 秒，误差 5 秒无所谓，
+    // 但比 45 秒还粗就会让「刚断线的人重连」撞上还没被收掉的自己。
+    let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
+    sweeper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("收到 Ctrl-C，退出");
                 break;
+            }
+            _ = sweeper.tick() => {
+                let reaped = {
+                    let mut server = shared.server.lock().expect("锁没中毒");
+                    server.sweep_idle(now_ms())
+                };
+                if reaped > 0 {
+                    println!("回收了 {reaped} 条僵尸会话（超过 ping_timeout 没有任何数据）");
+                }
             }
             _ = ticker.tick() => {
                 let (metrics, events) = {

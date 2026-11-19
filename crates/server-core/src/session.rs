@@ -119,6 +119,12 @@ pub struct Session {
     pub control_rate: RateMeter,
     /// 语音面限速。
     pub voice_rate: RateMeter,
+    /// 最后一次**收到**这条会话的东西（控制消息或语音包）的时刻，毫秒。
+    ///
+    /// 用来回收「连接还在、人已经不在了」的会话：半开连接（网线被拔、NAT 表被清、
+    /// 进程被强杀而 FIN 没送到）不会触发 TCP 的 EOF，服务器只能靠这个时间戳。
+    /// 阈值就是下发给客户端的 `ping_timeout_ms`（45 s）—— 承诺与执行用同一个数。
+    pub last_seen_ms: u64,
 }
 
 impl Session {
