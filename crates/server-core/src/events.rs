@@ -23,6 +23,8 @@ pub const MAX_EVENTS: usize = 1024;
 pub enum KillReason {
     /// 连续 AEAD 失败（伪造或密钥不同步）。
     BadTag,
+    /// 被管理员踢出（ADR-0016）。踢人时填的原因不进日志，只发给被踢的人。
+    Kicked,
 }
 
 impl KillReason {
@@ -31,6 +33,7 @@ impl KillReason {
     pub const fn name(self) -> &'static str {
         match self {
             Self::BadTag => "bad_tag",
+            Self::Kicked => "kicked",
         }
     }
 }
@@ -100,6 +103,12 @@ pub enum Event {
         /// 频道 id。
         channel: ChannelId,
     },
+    /// 某个账号的权限位变了（ADR-0016）。只记账号 id，不记是谁改的——
+    /// 那条信息在「同一个时间窗口里有谁的 SetUserPerms 被接受」里，不必再存一份。
+    PermsChanged {
+        /// 账号 id。
+        user_id: UserId,
+    },
 }
 
 impl Event {
@@ -116,6 +125,7 @@ impl Event {
             Self::VoiceRebound { .. } => "voice_rebound",
             Self::JoinedChannel { .. } => "joined_channel",
             Self::LeftChannel { .. } => "left_channel",
+            Self::PermsChanged { .. } => "perms_changed",
         }
     }
 
@@ -181,6 +191,7 @@ mod tests {
                 session: 1,
                 channel: 3,
             },
+            Event::PermsChanged { user_id: 4 },
         ];
         for sample in samples {
             let json = sample.to_json();
@@ -201,5 +212,6 @@ mod tests {
     #[test]
     fn kill_reason_names_are_stable() {
         assert_eq!(KillReason::BadTag.name(), "bad_tag");
+        assert_eq!(KillReason::Kicked.name(), "kicked");
     }
 }

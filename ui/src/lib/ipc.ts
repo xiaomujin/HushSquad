@@ -44,6 +44,46 @@ export interface Member {
   volume: number;
 }
 
+/**
+ * 权限位（ADR-0016）。与 `server-core::perms` 一一对应。
+ *
+ * 界面**只**用它决定菜单显示什么；真正的校验在服务器，这里算错了最多多显示一个
+ * 点了没反应的按钮，不会多给一分权限。
+ */
+export const PERM = {
+  JOIN_CHANNEL: 1,
+  MOVE_ANYONE: 2,
+  KICK: 4,
+  BAN: 8,
+  CREATE_CHANNEL: 16,
+  MANAGE_CHANNEL: 32,
+  ADMIN: 64,
+  MUTE_OTHERS: 128,
+  OWNER: 256,
+} as const;
+
+/** 内置角色：位图的命名组合（与 `server-core::perms` 一致）。 */
+export const ROLES: { id: string; label: string; perms: number }[] = [
+  { id: 'owner', label: '服主', perms: 511 },
+  { id: 'admin', label: '管理员', perms: 255 },
+  { id: 'moderator', label: '协管', perms: 135 },
+  { id: 'member', label: '成员', perms: 1 },
+];
+
+/** 位图 → 角色名；不在内置角色里时返回 null（界面显示「自定义」）。 */
+export function roleOf(perms: number): { id: string; label: string; perms: number } | null {
+  return ROLES.find((role) => role.perms === perms) ?? null;
+}
+
+/** 账号列表里的一行（管理面板用）。 */
+export interface Account {
+  user_id: number;
+  name: string;
+  perms: number;
+  anonymous: boolean;
+  online: boolean;
+}
+
 /** 10–20 Hz 合并推送。 */
 export interface Meters {
   talking: boolean;
@@ -117,6 +157,10 @@ export interface Handlers {
   onChannels: (channels: Channel[], selfChannel: number) => void;
   onMembers: (members: Member[], selfUserId: number) => void;
   onMeters: (meters: Meters) => void;
+  /** 自己的权限位变了（认证时一次，管理员改动时再来）。 */
+  onPerms: (perms: number) => void;
+  /** 账号列表（管理面板请求之后来一次）。 */
+  onAccounts: (accounts: Account[]) => void;
   onNet: (net: Net) => void;
 }
 
@@ -135,6 +179,16 @@ export interface Backend {
   setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void>;
   setUser(userId: number, patch: { volume?: number; mute?: boolean; solo?: boolean }): Promise<void>;
   setView(view: View): Promise<void>;
+  /** 把别人移到另一个频道（需要 MOVE_ANYONE）。 */
+  moveUser(userId: number, channelId: number): Promise<void>;
+  /** 服务器静音 / 闭麦别人（需要 MUTE_OTHERS）。 */
+  setUserState(userId: number, patch: { server_mute?: boolean; server_deaf?: boolean }): Promise<void>;
+  /** 踢出服务器（需要 KICK）。 */
+  kickUser(userId: number, reason: string): Promise<void>;
+  /** 请求账号列表（需要 ADMIN），结果走 onAccounts。 */
+  listUsers(): Promise<void>;
+  /** 改某个账号的权限位（需要 ADMIN）。 */
+  setUserPerms(userId: number, perms: number): Promise<void>;
   /**
    * 忘掉这台服务器记住的证书指纹。
    *
@@ -216,6 +270,8 @@ export class MockBackend implements Backend {
       { user_id: 2, name: '老K', channel_id: HALL, mute: false, solo: false, server_mute: false, volume: 100 },
       { user_id: 3, name: '阿岚', channel_id: HALL, mute: true, solo: false, server_mute: false, volume: 80 },
     ];
+    // Mock 里自己是服主：这样评审时能看见管理面板与右键菜单。
+    this.#handlers?.onPerms(511);
     this.#handlers?.onPhase('connected');
     this.#handlers?.onChannels(CHANNELS, 0);
     this.#handlers?.onMembers(this.#members, SELF);
@@ -262,6 +318,39 @@ export class MockBackend implements Backend {
   }
 
   async setView(_view: View): Promise<void> {}
+
+  // Mock 只模拟**契约**：这几个管理动作在浏览器里没有真服务器可打，
+  // 所以只把本地那一份成员表改掉，让界面能看出「点下去有反应」。
+  async moveUser(userId: number, channelId: number): Promise<void> {
+    for (const m of this.#members) if (m.user_id === userId) m.channel_id = channelId;
+    this.#handlers?.onMembers(this.#members, SELF);
+  }
+
+  async setUserState(userId: number, patch: { server_mute?: boolean; server_deaf?: boolean }): Promise<void> {
+    for (const m of this.#members) {
+      if (m.user_id === userId && patch.server_mute !== undefined) m.server_mute = patch.server_mute;
+    }
+    this.#handlers?.onMembers(this.#members, SELF);
+  }
+
+  async kickUser(userId: number, _reason: string): Promise<void> {
+    this.#members = this.#members.filter((m) => m.user_id !== userId);
+    this.#handlers?.onMembers(this.#members, SELF);
+  }
+
+  async listUsers(): Promise<void> {
+    this.#handlers?.onAccounts(
+      this.#members.map((m) => ({
+        user_id: m.user_id,
+        name: m.name,
+        perms: m.user_id === SELF ? 511 : 1,
+        anonymous: false,
+        online: true,
+      })),
+    );
+  }
+
+  async setUserPerms(_userId: number, _perms: number): Promise<void> {}
 
   async forgetTrust(_addr: string): Promise<void> {}
 

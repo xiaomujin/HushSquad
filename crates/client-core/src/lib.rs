@@ -69,6 +69,26 @@ pub enum ClientAction {
     },
     /// 连接关闭。
     Closed,
+    /// 账号列表（管理面板用）。只有带 `ADMIN` 的会话才请求得到。
+    UserList(Vec<AccountEntry>),
+}
+
+/// 账号列表里的一行（管理面板用）。
+///
+/// 与 `server-core::UserEntry` 字段一致，但这里是**客户端**的类型：`client-core`
+/// 不依赖 `server-core`（依赖方向是 server-core → 协议 → client-core）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntry {
+    /// 账号 id。
+    pub user_id: u32,
+    /// 用户名。
+    pub username: String,
+    /// 权限位图。
+    pub perms: u64,
+    /// 是否是设备号匿名建出来的号。
+    pub anonymous: bool,
+    /// 现在有会话在线。
+    pub online: bool,
 }
 
 /// 收到一个语音面报文之后的解读结果。
@@ -321,6 +341,71 @@ impl Client {
         })
     }
 
+    /// 把别人移到另一个频道（需要 `MOVE_ANYONE`）。
+    pub fn move_user(&mut self, user_id: u32, channel_id: u32) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::MoveUser(pb::MoveUser {
+                user_id,
+                channel_id,
+            })),
+        })
+    }
+
+    /// 改别人的服务器侧状态（需要 `MUTE_OTHERS`）。
+    pub fn set_user_state(
+        &mut self,
+        user_id: u32,
+        server_mute: Option<bool>,
+        server_deaf: Option<bool>,
+    ) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::SetUserState(pb::SetUserState {
+                user_id,
+                server_mute,
+                server_deaf,
+            })),
+        })
+    }
+
+    /// 踢出服务器（需要 `KICK`）。
+    pub fn kick_user(&mut self, user_id: u32, reason: &str) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::KickUser(pb::KickUser {
+                user_id,
+                reason: reason.to_owned(),
+            })),
+        })
+    }
+
+    /// 请求账号列表（需要 `ADMIN`）。
+    pub fn list_users(&mut self) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::ListUsers(pb::ListUsers {})),
+        })
+    }
+
+    /// 改某个账号的权限位（需要 `ADMIN`，且授予的位必须是自己的子集）。
+    pub fn set_user_perms(&mut self, user_id: u32, perms: u64) -> ClientAction {
+        let request_id = self.next_request_id();
+        ClientAction::Send(ControlMessage {
+            protocol: PROTOCOL_VERSION,
+            request_id,
+            kind: Some(Kind::SetUserPerms(pb::SetUserPerms { user_id, perms })),
+        })
+    }
+
     /// 离开当前频道。
     pub fn leave_channel(&mut self) -> ClientAction {
         let request_id = self.next_request_id();
@@ -419,6 +504,21 @@ impl Client {
             Some(Kind::Pong(pong)) => {
                 // 只记 RTT 用的原始时间戳；RTT 由调用方用它自己的时钟算。
                 let _ = pong.ts_us;
+            }
+            Some(Kind::UserList(list)) => {
+                // 账号列表不改变任何镜像（别人的权限 v1 不下发），只往上传给外壳。
+                actions.push(ClientAction::UserList(
+                    list.users
+                        .into_iter()
+                        .map(|entry| AccountEntry {
+                            user_id: entry.user_id,
+                            username: entry.username,
+                            perms: entry.perms,
+                            anonymous: entry.anonymous,
+                            online: entry.online,
+                        })
+                        .collect(),
+                ));
             }
             _ => {}
         }

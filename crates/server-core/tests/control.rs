@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{NOW, connect, join, join_channel, send_control, sent_messages, server};
+use common::{
+    NOW, connect, deliver, epoch_of, join, join_channel, roles, send_control, sent_messages, server,
+};
 use protocol::control::proto as pb;
 use protocol::control::proto::control_message::Kind;
 use server_core::{Action, Server, ServerConfig};
@@ -402,4 +404,428 @@ fn default_channel_cap_matches_the_mixer() {
     // 满员时每个客户端最多混 31 路远端，仍落在 32 个槽位以内。
     // 这条数字是跨 crate 的约定，改一边就必须改另一边。
     assert_eq!(ServerConfig::default().max_channel_users, 32);
+}
+
+// ---------------------------------------------------------------- 权限（ADR-0016）
+
+/// 只取错误消息。
+fn errors(actions: &[Action]) -> Vec<(u64, &pb::Error)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Send { msg, .. } => match &msg.kind {
+                Some(Kind::Error(error)) => Some((msg.request_id, error)),
+                _ => None,
+            },
+            Action::Close { .. } => None,
+        })
+        .collect()
+}
+
+/// 关掉了哪些会话。
+fn closed(actions: &[Action]) -> Vec<(server_core::SessionId, u32)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Close { session, code, .. } => Some((*session, *code)),
+            Action::Send { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_member_cannot_kick_anyone_and_the_error_echoes_the_request_id() {
+    let (mut s, _db) = roles();
+    let bob = connect(&mut s, "bob", "bob-pw", 2);
+    let carol = connect(&mut s, "carol", "carol-pw", 3);
+
+    let actions = send_control(
+        &mut s,
+        carol.id,
+        Kind::KickUser(pb::KickUser {
+            user_id: 2,
+            reason: String::new(),
+        }),
+        77,
+    );
+
+    assert!(closed(&actions).is_empty(), "成员不能关掉任何会话");
+    let errs = errors(&actions);
+    assert_eq!(errs.len(), 1, "只该回一条错误");
+    assert_eq!(errs[0].0, 77, "错误必须带回同一个 request_id");
+    assert_eq!(errs[0].1.code, pb::ErrorCode::PermissionDenied as u32);
+    assert_eq!(s.metrics().permission_denied, 1, "越权要计数");
+    assert!(s.session(bob.id).unwrap().is_ready(), "bob 不该被动过");
+}
+
+#[test]
+fn a_moderator_can_kick_a_member_and_the_target_gets_a_fatal_error() {
+    let (mut s, _db) = roles();
+    let bob = connect(&mut s, "bob", "bob-pw", 2);
+    let carol = connect(&mut s, "carol", "carol-pw", 3);
+
+    let actions = send_control(
+        &mut s,
+        bob.id,
+        Kind::KickUser(pb::KickUser {
+            user_id: 3,
+            reason: "太吵了".to_owned(),
+        }),
+        9,
+    );
+
+    assert_eq!(
+        closed(&actions),
+        vec![(carol.id, pb::ErrorCode::Kicked as u32)],
+        "被踢的会话要被关掉"
+    );
+    let (_, msg) = sent_messages(&actions)
+        .into_iter()
+        .find(|(to, _)| *to == carol.id)
+        .expect("被踢的人要收到一条消息");
+    let Some(Kind::Error(error)) = &msg.kind else {
+        panic!("被踢的人应当收到 Error");
+    };
+    assert!(error.fatal, "踢人必须是 fatal");
+    assert!(error.message.contains("太吵了"), "原因要传给被踢的人");
+    assert_eq!(s.metrics().kicks, 1);
+    // 日志里**不**记原因：原因可能带着别人的隐私。
+    let events = s.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            server_core::Event::SessionKilled {
+                reason: server_core::KillReason::Kicked,
+                ..
+            }
+        )),
+        "踢人要在事件里留一条"
+    );
+}
+
+#[test]
+fn an_admin_cannot_kick_the_owner() {
+    let (mut s, _db) = roles();
+    let alice = connect(&mut s, "alice", "alice-pw", 1);
+    let bob = connect(&mut s, "bob", "bob-pw", 2);
+
+    let actions = send_control(
+        &mut s,
+        bob.id,
+        Kind::KickUser(pb::KickUser {
+            user_id: 1,
+            reason: String::new(),
+        }),
+        1,
+    );
+
+    assert!(closed(&actions).is_empty(), "管理员踢不了服主");
+    assert_eq!(
+        errors(&actions)[0].1.code,
+        pb::ErrorCode::PermissionDenied as u32
+    );
+    assert!(s.session(alice.id).unwrap().is_ready());
+}
+
+#[test]
+fn nobody_can_grant_permissions_they_do_not_have() {
+    let (mut s, db) = roles();
+    let bob = connect(&mut s, "bob", "bob-pw", 2);
+
+    // 管理员想把 carol 提成服主：授予 ⊄ 自己 → 拒绝。
+    let actions = send_control(
+        &mut s,
+        bob.id,
+        Kind::SetUserPerms(pb::SetUserPerms {
+            user_id: 3,
+            perms: server_core::perms::OWNER_ROLE,
+        }),
+        5,
+    );
+
+    assert_eq!(
+        errors(&actions)[0].1.code,
+        pb::ErrorCode::PermissionDenied as u32
+    );
+    assert_eq!(
+        db.perms_of(3),
+        server_core::perms::MEMBER,
+        "被拒的请求不能改库"
+    );
+}
+
+#[test]
+fn the_owner_bit_moves_atomically() {
+    let (mut s, db) = roles();
+    let alice = connect(&mut s, "alice", "alice-pw", 1);
+    let bob = connect(&mut s, "bob", "bob-pw", 2);
+
+    let actions = send_control(
+        &mut s,
+        alice.id,
+        Kind::SetUserPerms(pb::SetUserPerms {
+            user_id: 2,
+            perms: server_core::perms::OWNER_ROLE,
+        }),
+        11,
+    );
+
+    assert!(errors(&actions).is_empty(), "服主转移不该报错");
+    assert_eq!(
+        db.perms_of(2),
+        server_core::perms::OWNER_ROLE,
+        "bob 应当成为服主"
+    );
+    assert_eq!(
+        db.perms_of(1),
+        server_core::perms::ADMIN_ROLE,
+        "alice 应当降成管理员（服主位被清掉，其余位不动）"
+    );
+    // 两条 PermsChanged：一条给新服主，一条给旧服主。两人都还在线，所以都收到。
+    let changed: Vec<u32> = sent_messages(&actions)
+        .into_iter()
+        .filter_map(|(_, msg)| match &msg.kind {
+            Some(Kind::PermsChanged(p)) => Some(p.user_id),
+            _ => None,
+        })
+        .collect();
+    assert!(changed.contains(&2), "新服主要收到 PermsChanged");
+    assert!(changed.contains(&1), "旧服主也要收到（他的权限变了）");
+    // 在线会话的权限要**立刻**变：bob 不用重连就已经是服主了。
+    assert_eq!(
+        s.session(bob.id).unwrap().perms,
+        server_core::perms::OWNER_ROLE,
+        "在线的会话也要跟着改"
+    );
+    assert_eq!(
+        s.session(alice.id).unwrap().perms,
+        server_core::perms::ADMIN_ROLE,
+        "旧服主的会话要降成管理员"
+    );
+}
+
+#[test]
+fn the_last_admin_cannot_be_demoted() {
+    let (mut s, db) = roles();
+    let alice = connect(&mut s, "alice", "alice-pw", 1);
+
+    // 把唯一的管理员（自己，且是服主）降成成员 → 服务器会没人能管。
+    let actions = send_control(
+        &mut s,
+        alice.id,
+        Kind::SetUserPerms(pb::SetUserPerms {
+            user_id: 1,
+            perms: server_core::perms::MEMBER,
+        }),
+        12,
+    );
+
+    assert_eq!(errors(&actions)[0].1.code, pb::ErrorCode::Conflict as u32);
+    assert_eq!(
+        db.perms_of(1),
+        server_core::perms::OWNER_ROLE,
+        "被拒之后库不能变"
+    );
+}
+
+#[test]
+fn the_owner_cannot_be_demoted_without_handing_it_over() {
+    let (mut s, db) = roles();
+    let alice = connect(&mut s, "alice", "alice-pw", 1);
+
+    let actions = send_control(
+        &mut s,
+        alice.id,
+        Kind::SetUserPerms(pb::SetUserPerms {
+            user_id: 1,
+            perms: server_core::perms::ADMIN_ROLE,
+        }),
+        13,
+    );
+
+    assert_eq!(
+        errors(&actions)[0].1.code,
+        pb::ErrorCode::Conflict as u32,
+        "把服主位去掉要走转移，不能直接清"
+    );
+    assert_eq!(db.perms_of(1), server_core::perms::OWNER_ROLE);
+}
+
+#[test]
+fn list_users_needs_admin_and_marks_who_is_online() {
+    let (mut s, _db) = roles();
+    let alice = connect(&mut s, "alice", "alice-pw", 1);
+    let carol = connect(&mut s, "carol", "carol-pw", 3);
+
+    // 成员看不到账号列表。
+    let denied = send_control(&mut s, carol.id, Kind::ListUsers(pb::ListUsers {}), 21);
+    assert_eq!(
+        errors(&denied)[0].1.code,
+        pb::ErrorCode::PermissionDenied as u32
+    );
+
+    let actions = send_control(&mut s, alice.id, Kind::ListUsers(pb::ListUsers {}), 22);
+    let (_, msg) = sent_messages(&actions)
+        .into_iter()
+        .find(|(to, _)| *to == alice.id)
+        .expect("服主要收到账号列表");
+    let Some(Kind::UserList(list)) = &msg.kind else {
+        panic!("应当是 UserList");
+    };
+    assert_eq!(list.users.len(), 3, "三个账号都在（含离线的 bob）");
+    let online = |user_id: u32| {
+        list.users
+            .iter()
+            .find(|entry| entry.user_id == user_id)
+            .map(|entry| entry.online)
+    };
+    assert_eq!(online(1), Some(true));
+    assert_eq!(online(2), Some(false), "bob 没连上来");
+    assert_eq!(online(3), Some(true));
+}
+
+#[test]
+fn server_mute_from_an_admin_actually_stops_the_voice_plane() {
+    // 这条是「权限不只是界面」的证明：管理员按下静音之后，被静音的人发的语音包
+    // 在**语音面**被丢掉，而不是靠客户端自觉。
+    let (mut s, _db) = roles();
+    s.add_channel(0, "大厅");
+    let alice = join(&mut s, "alice", "alice-pw", 1);
+    let carol = join(&mut s, "carol", "carol-pw", 3);
+    // 两个人都进同一个频道：语音面只转发给**同频道**的其他人，没人听就没有 targets。
+    join_channel(&mut s, alice.id, 1);
+    join_channel(&mut s, carol.id, 1);
+
+    let epoch = epoch_of(&s, 1);
+    let packet = carol.voice(1, epoch, &[1, 2, 3]);
+    let (outcome, sink) = deliver(&mut s, carol.addr, &packet, NOW);
+    assert!(
+        matches!(outcome, server_core::Outcome::Forwarded { .. }),
+        "静音之前应当转发，实际 {outcome:?}"
+    );
+    assert!(!sink.sent.is_empty());
+
+    // 管理员（这里是服主）静音 carol。
+    let actions = send_control(
+        &mut s,
+        alice.id,
+        Kind::SetUserState(pb::SetUserState {
+            user_id: 3,
+            server_mute: Some(true),
+            server_deaf: None,
+        }),
+        31,
+    );
+    assert!(errors(&actions).is_empty(), "服主可以静音成员");
+    assert!(s.session(carol.id).unwrap().server_mute);
+
+    let packet = carol.voice(2, epoch, &[4, 5, 6]);
+    let (outcome, _) = deliver(&mut s, carol.addr, &packet, NOW);
+    assert_eq!(
+        outcome,
+        server_core::Outcome::Dropped(server_core::DropReason::ServerMuted),
+        "被静音的人发的语音包必须在服务器侧丢掉"
+    );
+}
+
+#[test]
+fn an_admin_cannot_mute_the_owner() {
+    let (mut s, _db) = roles();
+    s.add_channel(0, "大厅");
+    let alice = join(&mut s, "alice", "alice-pw", 1);
+    let bob = join(&mut s, "bob", "bob-pw", 2);
+    join_channel(&mut s, alice.id, 1);
+    join_channel(&mut s, bob.id, 1);
+
+    let actions = send_control(
+        &mut s,
+        bob.id,
+        Kind::SetUserState(pb::SetUserState {
+            user_id: 1,
+            server_mute: Some(true),
+            server_deaf: None,
+        }),
+        32,
+    );
+    assert_eq!(
+        errors(&actions)[0].1.code,
+        pb::ErrorCode::PermissionDenied as u32
+    );
+    assert!(!s.session(alice.id).unwrap().server_mute, "服主不该被静音");
+}
+
+#[test]
+fn moving_a_member_needs_move_anyone_and_broadcasts_the_move() {
+    let (mut s, _db) = roles();
+    s.add_channel(0, "大厅");
+    s.add_channel(0, "小房间");
+    let alice = join(&mut s, "alice", "alice-pw", 1);
+    let carol = join(&mut s, "carol", "carol-pw", 3);
+    join_channel(&mut s, carol.id, 1);
+
+    // 成员挪不动别人。
+    let denied = send_control(
+        &mut s,
+        carol.id,
+        Kind::MoveUser(pb::MoveUser {
+            user_id: 1,
+            channel_id: 2,
+        }),
+        41,
+    );
+    assert_eq!(
+        errors(&denied)[0].1.code,
+        pb::ErrorCode::PermissionDenied as u32
+    );
+
+    // 服主可以把 carol 挪到 2 号频道。
+    let actions = send_control(
+        &mut s,
+        alice.id,
+        Kind::MoveUser(pb::MoveUser {
+            user_id: 3,
+            channel_id: 2,
+        }),
+        42,
+    );
+    assert!(errors(&actions).is_empty(), "服主可以移动成员");
+    assert_eq!(
+        s.session(carol.id).unwrap().channel,
+        Some(2),
+        "carol 应当已经在 2 号频道"
+    );
+    // 被移动的人自己也会收到 UserJoined（他的频道变了）。
+    assert!(
+        sent_messages(&actions)
+            .into_iter()
+            .any(|(to, msg)| to == carol.id && matches!(msg.kind, Some(Kind::UserJoined(_)))),
+        "被移动的人要收到自己的 UserJoined"
+    );
+}
+
+#[test]
+fn moving_into_a_group_container_is_refused() {
+    use server_core::channel::FLAG_CONTAINER;
+    let (mut s, _db) = roles();
+    s.add_channel(0, "大厅");
+    let group = s.add_channel(0, "分组");
+    s.channel_mut(group).unwrap().flags = FLAG_CONTAINER;
+    let alice = join(&mut s, "alice", "alice-pw", 1);
+    let carol = join(&mut s, "carol", "carol-pw", 3);
+    join_channel(&mut s, carol.id, 1);
+
+    let actions = send_control(
+        &mut s,
+        alice.id,
+        Kind::MoveUser(pb::MoveUser {
+            user_id: 3,
+            channel_id: group,
+        }),
+        43,
+    );
+    assert_eq!(
+        errors(&actions)[0].1.code,
+        pb::ErrorCode::PermissionDenied as u32
+    );
+    assert_eq!(s.session(carol.id).unwrap().channel, Some(1));
 }

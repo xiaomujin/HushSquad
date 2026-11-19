@@ -5,6 +5,10 @@
   let busy = $state(false);
   let failure = $state('');
   let info = $state('');
+  /** 用账号登录（管理员必须有账号：匿名账号拿不到权限）。 */
+  let account = $state(false);
+  let user = $state('');
+  let password = $state('');
 
   // 握手在后台线程上做：`busy` 只覆盖「把命令发出去」这一瞬间，
   // 真正在等的是阶段变成 authenticating 之后、connected 之前。
@@ -18,12 +22,16 @@
     try {
       await backend.connect({
         addr: app.addr,
-        identity: { kind: 'anonymous' },
+        identity: account
+          ? { kind: 'account', user: user.trim(), password }
+          : { kind: 'anonymous' },
         // 信任策略由 Rust 侧的 TOFU 决定：第一次记住指纹，变了就拒绝。
         trust: { kind: 'remember', fingerprint: 'tofu' },
         // 语音设置跟着连接一起下去：界面一进来就是语音激活，不用等用户去设置页点一下。
         voice: app.voice,
       });
+      // 密码不留在内存里：下次连接要么从设备 token 免密，要么重新输。
+      password = '';
     } catch (error) {
       failure = String(error);
     } finally {
@@ -74,10 +82,36 @@
 
     <label class="f">身份
       <div class="seg-ctl">
-        <button class="on">匿名（这台设备）</button>
-        <button disabled title="账号登录还没接到界面上">账号</button>
+        <button class:on={!account} onclick={() => (account = false)}>匿名（这台设备）</button>
+        <button class:on={account} onclick={() => (account = true)}>账号</button>
       </div>
     </label>
+
+    {#if account}
+      <label class="f">用户名
+        <div class="inp"><input bind:value={user} spellcheck="false" autocomplete="username" /></div>
+      </label>
+      <label class="f">密码
+        <div class="inp">
+          <input
+            type="password"
+            bind:value={password}
+            autocomplete="current-password"
+            onkeydown={(event) => event.key === 'Enter' && connect()}
+          />
+        </div>
+      </label>
+      <div class="tiny" style="margin-top:-4px">
+        账号由服务器管理员用 <span class="mono">hushsquad-server adduser</span> 创建。
+        密码只走 TLS，服务器存的是 argon2id 哈希。首次登录成功后服务器会下发一个设备
+        token，下次自动免密。
+      </div>
+    {:else}
+      <div class="tiny" style="margin-top:-4px">
+        按这台设备的设备号建号，不需要密码。权限最低（只能进频道）——
+        要让别人能管频道，得让管理员给你分配角色。
+      </div>
+    {/if}
 
     <div class="cert">
       <div class="h"><span class="dot ok"></span>首次连接这台服务器 · 会记住它的指纹</div>

@@ -100,6 +100,9 @@ pub struct StateView {
     pub self_user_id: u32,
     /// 自己在哪个频道。
     pub self_channel: u32,
+    /// 自己的权限位图（ADR-0016）。界面**只**用它决定菜单显示什么；
+    /// 真正的校验在服务器，这里存错了不会多给一分权限。
+    pub perms: u64,
     /// 自己静音（不发上行）。
     pub muted: bool,
     /// 自己闭听（不听别人）。
@@ -108,6 +111,21 @@ pub struct StateView {
     pub channels: Vec<ChannelView>,
     /// 成员表。
     pub members: Vec<MemberView>,
+}
+
+/// 账号列表里的一行（管理面板用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountView {
+    /// 账号 id。
+    pub user_id: u32,
+    /// 用户名。
+    pub name: String,
+    /// 权限位图。
+    pub perms: u64,
+    /// 是否是设备号匿名建出来的号。
+    pub anonymous: bool,
+    /// 现在有会话在线。
+    pub online: bool,
 }
 
 /// 20 Hz 的电平/发送状态。
@@ -159,7 +177,9 @@ pub struct NetView {
 /// 外壳 → 会话的指令。
 ///
 /// 会话每个 tick（10 ms）拉一次，所以指令延迟上限就是一个 tick。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 注意它**不是** `Copy`：踢人要带一段原因文本。这个类型不热——每个 tick 最多几条。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// 进某个频道。
     JoinChannel(u32),
@@ -178,6 +198,38 @@ pub enum Command {
     },
     /// 按住 / 松开「强制发送」（键盘 Space）。
     SetPtt(bool),
+    /// 把别人移到另一个频道（需要 `MOVE_ANYONE`）。
+    MoveUser {
+        /// 账号 id。
+        user_id: u32,
+        /// 目标频道。
+        channel_id: u32,
+    },
+    /// 改别人的服务器侧静音 / 闭麦（需要 `MUTE_OTHERS`）。
+    SetUserState {
+        /// 账号 id。
+        user_id: u32,
+        /// 服务器静音；`None` 表示不改。
+        server_mute: Option<bool>,
+        /// 服务器闭麦；`None` 表示不改。
+        server_deaf: Option<bool>,
+    },
+    /// 踢出服务器（需要 `KICK`）。
+    KickUser {
+        /// 账号 id。
+        user_id: u32,
+        /// 给被踢的人看的原因。
+        reason: String,
+    },
+    /// 请求账号列表（需要 `ADMIN`）。
+    ListUsers,
+    /// 改某个账号的权限位（需要 `ADMIN`）。
+    SetUserPerms {
+        /// 账号 id。
+        user_id: u32,
+        /// 新的权限位图。
+        perms: u64,
+    },
     /// 调某个人的本机音量 / 静音 / 独听。
     SetUser {
         /// 账号 id。
@@ -206,6 +258,8 @@ pub trait Host: Send {
     fn meters(&self, meters: &MetersView);
     /// 5 s 网络数字。
     fn net(&self, net: &NetView);
+    /// 账号列表（只在管理面板请求之后来一次）。
+    fn accounts(&self, accounts: &[AccountView]);
     /// 取一条待执行指令。
     fn command(&self) -> Option<Command>;
 }

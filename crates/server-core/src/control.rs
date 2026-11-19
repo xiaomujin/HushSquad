@@ -10,7 +10,8 @@ use protocol::control::proto::control_message::Kind;
 use protocol::{ControlMessage, PROTOCOL_VERSION, caps};
 
 use crate::auth::AuthMethod;
-use crate::channel::ChannelId;
+use crate::channel::{ChannelId, UserId};
+use crate::perms;
 use crate::session::{SessionId, SessionState};
 use crate::{Server, Session};
 
@@ -60,6 +61,21 @@ fn error_msg(code: pb::ErrorCode, message: &str, fatal: bool) -> ControlMessage 
     )
 }
 
+/// 带 `request_id` 的错误回复。
+///
+/// 管理类请求必须回带同一个 `request_id`：客户端靠它把「失败」对回到自己刚点的那个操作上，
+/// 否则界面上只能显示一条不知道从哪来的错误。
+fn error_reply(request_id: u64, code: pb::ErrorCode, message: &str) -> ControlMessage {
+    envelope(
+        request_id,
+        Kind::Error(pb::Error {
+            code: code as u32,
+            message: message.to_owned(),
+            fatal: false,
+        }),
+    )
+}
+
 impl Server {
     /// 处理一条控制面消息。
     ///
@@ -100,6 +116,11 @@ impl Server {
             Some(Kind::JoinChannel(join)) => self.on_join_channel(session_id, join),
             Some(Kind::LeaveChannel(_)) => self.on_leave_channel(session_id),
             Some(Kind::SetSelfState(state)) => self.on_set_self_state(session_id, state),
+            Some(Kind::MoveUser(req)) => self.on_move_user(session_id, request_id, req),
+            Some(Kind::SetUserState(req)) => self.on_set_user_state(session_id, request_id, req),
+            Some(Kind::KickUser(req)) => self.on_kick_user(session_id, request_id, req),
+            Some(Kind::ListUsers(_)) => self.on_list_users(session_id, request_id),
+            Some(Kind::SetUserPerms(req)) => self.on_set_user_perms(session_id, request_id, req),
             Some(Kind::Ping(ping)) => vec![Action::send(
                 session_id,
                 envelope(request_id, Kind::Pong(pb::Pong { ts_us: ping.ts_us })),
@@ -353,6 +374,15 @@ impl Server {
             )];
         }
 
+        self.apply_channel_move(session_id, channel_id)
+    }
+
+    /// 把一个会话放进频道，并把「谁进了谁出了」广播出去。
+    ///
+    /// **调用方负责校验**（频道存在、不是分组、没满员、有权限）。抽出来是因为
+    /// 自己进频道（`JoinChannel`）和把别人移过去（`MoveUser`）之后的动作**必须一模一样**——
+    /// 两份实现迟早会漏掉「广播 channel_epoch」这种一句话。
+    fn apply_channel_move(&mut self, session_id: SessionId, channel_id: ChannelId) -> Vec<Action> {
         // 先记下旧频道与它的同伴，离开时要通知他们。
         let old_channel = self.session(session_id).and_then(|s| s.channel);
         let old_peers = self.channel_peers(session_id);
@@ -539,5 +569,448 @@ impl Server {
             priority_speaker: 0,
             listening_channel_ids: Vec::new(),
         })
+    }
+
+    // ------------------------------------------------------------ 管理与权限（ADR-0016）
+
+    /// 管理类请求的公共前置：会话就绪 + 有权限。
+    ///
+    /// 返回 `Some(actions)` 表示「到此为止」；`None` 表示可以继续。
+    fn require(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        need: u64,
+    ) -> Option<Vec<Action>> {
+        let (ready, actor_perms) = match self.session(session_id) {
+            Some(session) => (session.is_ready(), session.perms),
+            None => return Some(Vec::new()),
+        };
+        if !ready {
+            self.metrics_mut().control_ignored += 1;
+            return Some(Vec::new());
+        }
+        if !perms::has(actor_perms, need) {
+            self.metrics_mut().permission_denied += 1;
+            return Some(vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "没有权限做这件事（需要管理员给你分配角色）",
+                ),
+            )]);
+        }
+        None
+    }
+
+    /// 某个账号当前在线的那条会话。
+    fn session_of_user(&self, user_id: UserId) -> Option<SessionId> {
+        self.sessions_ready()
+            .find(|session| session.user_id == user_id)
+            .map(|session| session.id)
+    }
+
+    /// 把一个 `UserState` 推给这些人（去重，且只推给就绪的会话）。
+    fn push_user_state(&self, targets: &[SessionId], user_state: &pb::UserState) -> Vec<Action> {
+        let mut targets: Vec<SessionId> = targets
+            .iter()
+            .copied()
+            .filter(|to| self.session(*to).is_some_and(Session::is_ready))
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        targets
+            .into_iter()
+            .map(|to| {
+                Action::send(
+                    to,
+                    envelope(
+                        0,
+                        Kind::UserUpdated(pb::UserUpdated {
+                            user: Some(user_state.clone()),
+                        }),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// 所有带 `ADMIN` 位的会话（管理面板要跟着变）。
+    fn admin_sessions(&self) -> Vec<SessionId> {
+        self.sessions_ready()
+            .filter(|session| perms::has(session.perms, perms::ADMIN))
+            .map(|session| session.id)
+            .collect()
+    }
+
+    /// 把别人移到另一个频道。需要 `MOVE_ANYONE`。
+    fn on_move_user(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::MoveUser,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::MOVE_ANYONE) {
+            return actions;
+        }
+        let Some(target) = self.session_of_user(req.user_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::InvalidArgument, "这个人不在线"),
+            )];
+        };
+        let actor_perms = self.session(session_id).map_or(0, |s| s.perms);
+        let target_perms = self.session(target).map_or(0, |s| s.perms);
+        if !perms::can_act_on(actor_perms, target_perms) {
+            self.metrics_mut().permission_denied += 1;
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "不能移动权限比你高的人",
+                ),
+            )];
+        }
+        let Some(channel) = self.channel(req.channel_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::ChannelNotFound, "频道不存在"),
+            )];
+        };
+        if channel.is_container() {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "这是分组，不能加入",
+                ),
+            )];
+        }
+        if !channel.has_room(self.config().max_channel_users) {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::ChannelFull, "频道已满"),
+            )];
+        }
+        if self.session(target).and_then(|s| s.channel) == Some(req.channel_id) {
+            // 已经在那儿了。不报错：右键点错一次不该弹窗。
+            return Vec::new();
+        }
+        self.apply_channel_move(target, req.channel_id)
+    }
+
+    /// 改别人的服务器侧状态（被管理员静音 / 闭麦）。需要 `MUTE_OTHERS`。
+    fn on_set_user_state(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::SetUserState,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::MUTE_OTHERS) {
+            return actions;
+        }
+        let Some(target) = self.session_of_user(req.user_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::InvalidArgument, "这个人不在线"),
+            )];
+        };
+        let actor_perms = self.session(session_id).map_or(0, |s| s.perms);
+        let target_perms = self.session(target).map_or(0, |s| s.perms);
+        if !perms::can_act_on(actor_perms, target_perms) {
+            self.metrics_mut().permission_denied += 1;
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "不能静音权限比你高的人",
+                ),
+            )];
+        }
+        if let Some(s) = self.session_mut(target) {
+            if let Some(mute) = req.server_mute {
+                s.server_mute = mute;
+            }
+            if let Some(deaf) = req.server_deaf {
+                s.server_deaf = deaf;
+            }
+        }
+        let Some(user_state) = self.user_state(target) else {
+            return Vec::new();
+        };
+        // 推给：他所在频道的人 + 他自己 + 动手的管理员（他可能不在同一个频道）。
+        let mut targets = self.channel_peers(target);
+        targets.push(target);
+        targets.push(session_id);
+        self.push_user_state(&targets, &user_state)
+    }
+
+    /// 踢出服务器。需要 `KICK`。
+    fn on_kick_user(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::KickUser,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::KICK) {
+            return actions;
+        }
+        let Some(target) = self.session_of_user(req.user_id) else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::InvalidArgument, "这个人不在线"),
+            )];
+        };
+        if target == session_id {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::InvalidArgument,
+                    "不能踢自己（想退出请断开连接）",
+                ),
+            )];
+        }
+        let actor_perms = self.session(session_id).map_or(0, |s| s.perms);
+        let target_perms = self.session(target).map_or(0, |s| s.perms);
+        if !perms::can_act_on(actor_perms, target_perms) {
+            self.metrics_mut().permission_denied += 1;
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "不能踢权限比你高的人",
+                ),
+            )];
+        }
+        // 原因只在**给被踢的人看的那条消息**里，不进日志（日志只记事件与 id）。
+        let reason = if req.reason.is_empty() {
+            "被管理员移出了服务器".to_owned()
+        } else {
+            format!("被管理员移出了服务器：{}", req.reason)
+        };
+        self.emit(crate::Event::SessionKilled {
+            session: target,
+            reason: crate::KillReason::Kicked,
+        });
+        self.metrics_mut().kicks += 1;
+        vec![
+            Action::send(
+                target,
+                envelope(
+                    request_id,
+                    Kind::Error(pb::Error {
+                        code: pb::ErrorCode::Kicked as u32,
+                        message: reason.clone(),
+                        fatal: true,
+                    }),
+                ),
+            ),
+            Action::Close {
+                session: target,
+                code: pb::ErrorCode::Kicked as u32,
+                message: reason,
+            },
+        ]
+    }
+
+    /// 账号列表（含离线的）。需要 `ADMIN`。
+    fn on_list_users(&mut self, session_id: SessionId, request_id: u64) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::ADMIN) {
+            return actions;
+        }
+        let Some(admin) = self.user_admin() else {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Internal,
+                    "这个服务器没有接账号管理",
+                ),
+            )];
+        };
+        let entries = match admin.list_users() {
+            Ok(entries) => entries,
+            Err(error) => {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(request_id, pb::ErrorCode::Internal, &error.to_string()),
+                )];
+            }
+        };
+        let online: Vec<UserId> = self.sessions_ready().map(|s| s.user_id).collect();
+        let users = entries
+            .into_iter()
+            .map(|entry| pb::UserEntry {
+                user_id: entry.user_id,
+                username: entry.username,
+                perms: entry.perms,
+                anonymous: entry.anonymous,
+                online: online.contains(&entry.user_id),
+            })
+            .collect();
+        vec![Action::send(
+            session_id,
+            envelope(request_id, Kind::UserList(pb::UserList { users })),
+        )]
+    }
+
+    /// 改某个账号的权限位。需要 `ADMIN`，且授予的位必须是自己的子集。
+    fn on_set_user_perms(
+        &mut self,
+        session_id: SessionId,
+        request_id: u64,
+        req: pb::SetUserPerms,
+    ) -> Vec<Action> {
+        if let Some(actions) = self.require(session_id, request_id, perms::ADMIN) {
+            return actions;
+        }
+        let actor_perms = self.session(session_id).map_or(0, |s| s.perms);
+        // 1. 防提权：授予的位必须是自己的子集（给自己加位也走这条）。
+        if !perms::can_grant(actor_perms, req.perms) {
+            self.metrics_mut().permission_denied += 1;
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "不能授予自己没有的权限（服主位只能由服主转移）",
+                ),
+            )];
+        }
+        let Some(admin) = self.user_admin() else {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Internal,
+                    "这个服务器没有接账号管理",
+                ),
+            )];
+        };
+        let Ok(mut users) = admin.list_users() else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::Internal, "读账号库失败"),
+            )];
+        };
+        let Some(target) = users
+            .iter()
+            .find(|entry| entry.user_id == req.user_id)
+            .cloned()
+        else {
+            return vec![Action::send(
+                session_id,
+                error_reply(request_id, pb::ErrorCode::InvalidArgument, "没有这个账号"),
+            )];
+        };
+        // 2. 不能改权限比自己高的人（降级同僚要走自己的权限范围）。
+        if !perms::can_act_on(actor_perms, target.perms) {
+            self.metrics_mut().permission_denied += 1;
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::PermissionDenied,
+                    "不能改权限比你高的人",
+                ),
+            )];
+        }
+
+        // 3. 服主位：要么原子转移，要么拒绝。
+        let mut changes: Vec<(UserId, u64)> = Vec::new();
+        let wants_owner = req.perms & perms::OWNER != 0;
+        let is_owner = target.perms & perms::OWNER != 0;
+        if wants_owner && !is_owner {
+            // 转移：先把旧服主的位清掉。旧服主失去 OWNER 后仍是管理员。
+            for entry in &users {
+                if entry.user_id != req.user_id && entry.perms & perms::OWNER != 0 {
+                    changes.push((entry.user_id, entry.perms & !perms::OWNER));
+                }
+            }
+        } else if is_owner && !wants_owner {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Conflict,
+                    "服务器必须有一个服主；要换人请把服主位直接给新的人",
+                ),
+            )];
+        }
+        changes.push((req.user_id, req.perms));
+
+        // 4. 不能把最后一个管理员改掉（服主算管理员，所以正常情况下这条不会触发，
+        //    但「把唯一的管理员降成成员」必须被挡住，否则服务器就没人能管了）。
+        for (user_id, new_perms) in &changes {
+            if let Some(entry) = users.iter_mut().find(|entry| entry.user_id == *user_id) {
+                entry.perms = *new_perms;
+            }
+        }
+        if !users
+            .iter()
+            .any(|entry| perms::has(entry.perms, perms::ADMIN))
+        {
+            return vec![Action::send(
+                session_id,
+                error_reply(
+                    request_id,
+                    pb::ErrorCode::Conflict,
+                    "不能把最后一个管理员降级（服务器会没人能管）",
+                ),
+            )];
+        }
+
+        // 5. 落库 + 更新在线会话 + 通知。
+        for (user_id, new_perms) in &changes {
+            if let Err(error) = admin.set_perms(*user_id, *new_perms) {
+                return vec![Action::send(
+                    session_id,
+                    error_reply(request_id, pb::ErrorCode::Internal, &error.to_string()),
+                )];
+            }
+        }
+        let mut actions = Vec::new();
+        for (user_id, new_perms) in &changes {
+            for target_session in self
+                .sessions_ready()
+                .map(|s| (s.id, s.user_id))
+                .collect::<Vec<_>>()
+            {
+                if target_session.1 == *user_id
+                    && let Some(session) = self.session_mut(target_session.0)
+                {
+                    session.perms = *new_perms;
+                }
+            }
+            self.emit(crate::Event::PermsChanged { user_id: *user_id });
+            // 只发给本人和所有管理员（v1 不广播别人的权限）。
+            let mut recipients = self.admin_sessions();
+            recipients.extend(
+                self.sessions_ready()
+                    .filter(|s| s.user_id == *user_id)
+                    .map(|s| s.id),
+            );
+            recipients.sort_unstable();
+            recipients.dedup();
+            for to in recipients {
+                actions.push(Action::send(
+                    to,
+                    envelope(
+                        0,
+                        Kind::PermsChanged(pb::PermsChanged {
+                            user_id: *user_id,
+                            perms: *new_perms,
+                        }),
+                    ),
+                ));
+            }
+        }
+        actions
     }
 }

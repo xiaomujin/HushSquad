@@ -137,6 +137,40 @@ impl UserStore {
         Ok(changed > 0)
     }
 
+    /// 改一个账号的权限位图。返回是否命中（账号不存在时 `false`）。
+    pub fn set_perms(&mut self, user_id: i64, perms: u64) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE users SET perms = ?2 WHERE user_id = ?1",
+            params![user_id, perms as i64],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 有没有哪个账号带 `mask` 里的任意一位。
+    ///
+    /// 「服务器有没有服主」就靠它判：没有就自动提一个，否则整台机器没人能管。
+    pub fn any_with_perms(&mut self, mask: u64) -> Result<bool, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE (perms & ?1) != 0",
+            params![mask as i64],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// 第一个非匿名账号（升级老库时把它提成服主）。
+    pub fn first_real_user(&mut self) -> Result<Option<UserRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT user_id, username, password_hash, perms, anonymous FROM users \
+             WHERE anonymous = 0 ORDER BY user_id LIMIT 1",
+        )?;
+        let mut rows = statement.query([])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_of(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 建一个匿名账号并绑定设备 token（一次事务里做完）。
     pub fn create_anonymous(
         &mut self,

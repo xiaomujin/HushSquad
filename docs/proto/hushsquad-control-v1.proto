@@ -35,6 +35,14 @@ message ControlMessage {
     Pong             pong              = 71;
     Stats            stats             = 72;
     Error            error             = 90;
+    // 110-119：管理与权限（ADR-0016）
+    MoveUser         move_user         = 110;
+    SetUserState     set_user_state    = 111;
+    KickUser         kick_user         = 112;
+    ListUsers        list_users        = 113;
+    UserList         user_list         = 114;
+    SetUserPerms     set_user_perms    = 115;
+    PermsChanged     perms_changed     = 116;
     // 100-199 预留：文本聊天、文件传输、管理面板
     // 200-255 预留：扩展能力，需在 caps 位图中声明
   }
@@ -114,16 +122,24 @@ message AuthResult {
   string message   = 6;
 }
 
-// 权限位（v1 只用到很少一部分，留足扩展）。
+// 权限位（ADR-0016：账号级的**全局**位图，不做按频道 ACL）。
+//
+// 位是**只追加**的：一旦发出去就不能重排，只能在末尾加新的位。
+// 四个内置角色是这些位的命名组合（见 server-core::perms）：
+//   成员 1；协管 1|2|4|128；管理员 1|2|4|8|16|32|64|128；服主 再加 256。
+// 组合是**嵌套**的（成员 ⊂ 协管 ⊂ 管理员 ⊂ 服主），这条让「不能操作权限比自己高的人」
+// 可以用一个子集判断表达。
 enum Perm {
   PERM_UNSPECIFIED      = 0;
   PERM_JOIN_CHANNEL     = 1;
   PERM_MOVE_ANYONE      = 2;   // 管理员把别人拉/踢出频道
   PERM_KICK             = 4;
-  PERM_BAN              = 8;
+  PERM_BAN              = 8;   // v1 不做，位保留
   PERM_CREATE_CHANNEL   = 16;
   PERM_MANAGE_CHANNEL   = 32;
   PERM_ADMIN            = 64;
+  PERM_MUTE_OTHERS      = 128; // 服务器静音别人（语音面已有执行路径）
+  PERM_OWNER            = 256; // 服主：唯一，可转移
 }
 
 // ---------------------------- 频道与成员 ----------------------------
@@ -185,6 +201,58 @@ message Whisper {
   bool   stop = 3;                   // true 表示结束定向
 }
 
+// ---------------------------- 管理与权限（ADR-0016） ----------------------------
+//
+// 每个请求都要服务器重新校验权限：客户端的菜单裁剪只是可发现性，不是安全边界。
+// 失败一律回 Error（带同一个 request_id），原因放 message，客户端原样显示。
+
+// 把别人移到另一个频道。需要 PERM_MOVE_ANYONE。
+message MoveUser {
+  uint32 user_id    = 1;
+  uint32 channel_id = 2;
+}
+
+// 改别人的服务器侧状态（被管理员静音 / 闭麦）。需要 PERM_MUTE_OTHERS。
+message SetUserState {
+  uint32 user_id     = 1;
+  optional bool server_mute = 2;   // 不填 = 不改
+  optional bool server_deaf = 3;
+}
+
+// 踢出服务器（断开会话）。需要 PERM_KICK。
+message KickUser {
+  uint32 user_id = 1;
+  string reason  = 2;   // 会显示给被踢的人
+}
+
+// 账号列表（含离线的）。需要 PERM_ADMIN。
+message ListUsers {}
+
+message UserEntry {
+  uint32 user_id   = 1;
+  string username  = 2;
+  uint64 perms     = 3;
+  bool   anonymous = 4;
+  bool   online    = 5;   // 现在有会话在线
+}
+
+message UserList {
+  repeated UserEntry users = 1;
+}
+
+// 改某个账号的权限位。需要 PERM_ADMIN，且授予的位必须是自己的子集（防提权）。
+// 带 PERM_OWNER 时做**原子转移**：清掉旧服主、设上新服主。
+message SetUserPerms {
+  uint32 user_id = 1;
+  uint64 perms   = 2;
+}
+
+// 权限变了。只发给**本人**和所有带 PERM_ADMIN 的会话（v1 不广播别人的权限）。
+message PermsChanged {
+  uint32 user_id = 1;
+  uint64 perms   = 2;
+}
+
 // ---------------------------- 密钥与运维 ----------------------------
 
 message RekeyRequest  { uint32 key_epoch = 1; }
@@ -219,4 +287,7 @@ enum ErrorCode {
   SERVER_FULL              = 7;
   VOICE_BIND_TIMEOUT       = 8;
   INTERNAL                 = 9;
+  INVALID_ARGUMENT         = 10;  // 名字非法、层级超限、参数越界
+  CONFLICT                 = 11;  // 同级重名、频道非空、最后一个管理员
+  KICKED                   = 12;  // 被管理员踢出（fatal=true）
 }

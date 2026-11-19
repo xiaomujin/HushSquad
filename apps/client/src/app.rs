@@ -34,7 +34,9 @@ use tokio_rustls::client::TlsStream;
 use crate::audio::{Capture, LevelMeter, Playout};
 use crate::config::{Config, FRAME_MS};
 use crate::control::{self, Trust};
-use crate::host::{ChannelView, Command, Host, MemberView, MetersView, NetView, Phase, StateView};
+use crate::host::{
+    AccountView, ChannelView, Command, Host, MemberView, MetersView, NetView, Phase, StateView,
+};
 
 /// 收发节奏。
 const TICK: Duration = Duration::from_millis(FRAME_MS);
@@ -971,6 +973,24 @@ impl<'a> App<'a> {
         {
             self.dirty = true;
         }
+        // 账号列表是**一次性**的答复，不进镜像：直接推给外壳，`write_actions` 不再管它。
+        for action in &actions {
+            if let ClientAction::UserList(entries) = action
+                && let Some(host) = self.host
+            {
+                let views: Vec<AccountView> = entries
+                    .iter()
+                    .map(|entry| AccountView {
+                        user_id: entry.user_id,
+                        name: entry.username.clone(),
+                        perms: entry.perms,
+                        anonymous: entry.anonymous,
+                        online: entry.online,
+                    })
+                    .collect();
+                host.accounts(&views);
+            }
+        }
         // 服务器确认了换频道：`ChannelSync` 里带着我的新 channel_id。
         if let Some(channel_id) = self.pending_join
             && self.client.roster().my_channel() == channel_id
@@ -1192,6 +1212,35 @@ impl<'a> App<'a> {
                     self.phase = Phase::Joining;
                     self.dirty = true;
                 }
+                Command::MoveUser {
+                    user_id,
+                    channel_id,
+                } => {
+                    let action = self.client.move_user(user_id, channel_id);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::SetUserState {
+                    user_id,
+                    server_mute,
+                    server_deaf,
+                } => {
+                    let action = self
+                        .client
+                        .set_user_state(user_id, server_mute, server_deaf);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::KickUser { user_id, reason } => {
+                    let action = self.client.kick_user(user_id, &reason);
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::ListUsers => {
+                    let action = self.client.list_users();
+                    write_actions(writer, vec![action]).await?;
+                }
+                Command::SetUserPerms { user_id, perms } => {
+                    let action = self.client.set_user_perms(user_id, perms);
+                    write_actions(writer, vec![action]).await?;
+                }
                 Command::Disconnect => self.quit = true,
             }
         }
@@ -1335,6 +1384,7 @@ impl<'a> App<'a> {
             error: None,
             self_user_id: roster.self_user_id(),
             self_channel: roster.my_channel(),
+            perms: roster.self_perms(),
             muted: self.muted,
             deafened: self.deafened,
             channels: channel_views(&self.client),
@@ -1590,6 +1640,7 @@ fn announce(host: Option<&dyn Host>, phase: Phase, error: Option<String>, client
         error,
         self_user_id: client.map_or(0, |client| client.roster().self_user_id()),
         self_channel: client.map_or(0, |client| client.roster().my_channel()),
+        perms: client.map_or(0, |client| client.roster().self_perms()),
         muted: false,
         deafened: false,
         channels: client.map_or_else(Vec::new, channel_views),
@@ -1736,6 +1787,8 @@ where
             ClientAction::Closed => return Err("服务器关闭了会话".to_owned()),
             // 成员/频道变化：`Client` 自己已经更新过镜像，这里没有副作用要做。
             ClientAction::RosterChanged => {}
+            // 账号列表：`on_control` 已经推给外壳了，这一层只管 TLS。
+            ClientAction::UserList(_) => {}
             // 绑定由 `run` 显式做（它要发 UDP，而这里只碰 TLS）。
             ClientAction::BindVoice { .. } => {}
         }
@@ -1834,7 +1887,9 @@ where
                     }
                 }
                 ClientAction::Closed => return Err("服务器关闭了会话".to_owned()),
-                ClientAction::RosterChanged | ClientAction::BindVoice { .. } => {}
+                ClientAction::RosterChanged
+                | ClientAction::BindVoice { .. }
+                | ClientAction::UserList(_) => {}
             }
         }
     }

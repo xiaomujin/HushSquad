@@ -1,5 +1,6 @@
 <script lang="ts">
   import ConnectScreen from './components/ConnectScreen.svelte';
+  import ContextMenu from './components/ContextMenu.svelte';
   import RoomScreen from './components/RoomScreen.svelte';
   import SettingsScreen from './components/SettingsScreen.svelte';
   import { backend } from './lib/backend';
@@ -30,6 +31,12 @@
     onMeters(meters) {
       app.meters = meters;
     },
+    onPerms(perms) {
+      app.perms = perms;
+    },
+    onAccounts(accounts) {
+      app.accounts = accounts;
+    },
     onNet(net) {
       app.net = net;
     },
@@ -52,7 +59,6 @@
       });
     }
   });
-  let settingsOpen = $state(false);
   const inRoom = $derived(app.phase === 'in_channel' || app.phase === 'joining' || app.phase === 'reconnecting');
 
   // Space = 强制发送（三种说话方式下都有效，这是设置页给用户的承诺）。
@@ -85,10 +91,12 @@
   });
 </script>
 
-{#if settingsOpen}
-  <SettingsScreen onclose={() => (settingsOpen = false)} />
+{#if app.settingsOpen}
+  <SettingsScreen onclose={() => (app.settingsOpen = false)} />
 {:else if inRoom}
-  <RoomScreen onsettings={() => (settingsOpen = true)} />
+  <RoomScreen onsettings={() => app.openSettings('audio')} />
 {:else}
   <ConnectScreen />
 {/if}
+
+<ContextMenu />

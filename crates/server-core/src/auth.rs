@@ -98,6 +98,33 @@ pub trait Authenticator: core::fmt::Debug + Send + Sync {
     fn authenticate(&self, method: AuthMethod<'_>) -> Result<AuthOutcome, AuthError>;
 }
 
+/// 账号列表里的一行（管理面板用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserEntry {
+    /// 账号 id。
+    pub user_id: UserId,
+    /// 用户名。
+    pub username: String,
+    /// 权限位图。
+    pub perms: u64,
+    /// 是否是设备号匿名建出来的号。
+    pub anonymous: bool,
+}
+
+/// 账号管理。**与 [`Authenticator`] 分开**，不是图省事：
+///
+/// - 登录在握手路径上，必须快、只读；
+/// - 管理是管理员触发的低频操作，要写库，还可能失败（磁盘、约束冲突）。
+///
+/// 合成一个 trait 会让「认证器」这种东西同时持有写权限，而它被所有会话共享。
+pub trait UserAdmin: core::fmt::Debug + Send + Sync {
+    /// 列出全部账号（含离线的）。
+    fn list_users(&self) -> Result<Vec<UserEntry>, AuthError>;
+
+    /// 写一个账号的权限位图。
+    fn set_perms(&self, user_id: UserId, perms: u64) -> Result<(), AuthError>;
+}
+
 /// 一条用户记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {

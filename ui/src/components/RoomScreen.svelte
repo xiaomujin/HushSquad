@@ -4,7 +4,11 @@
   import MemberArea from './MemberArea.svelte';
   import NetworkPanel from './NetworkPanel.svelte';
   import { initial } from '../lib/format';
+  import { roleOf } from '../lib/ipc';
   import { app } from '../lib/state.svelte';
+
+  // 自己的角色。匿名账号只有「成员」——这也顺便说明了「为什么我看不到管理菜单」。
+  const roleLabel = $derived(roleOf(app.perms)?.label ?? '自定义');
 
   let { onsettings }: { onsettings: () => void } = $props();
 
@@ -75,7 +79,7 @@
       <div class="ava sm a1">{initial(app.self?.name ?? '')}</div>
       <div>
         <div class="me-nm">{app.self?.name ?? '我'}</div>
-        <div class="me-sb">匿名 · 这台设备</div>
+        <div class="me-sb">{roleLabel}</div>
       </div>
     </div>
   </aside>

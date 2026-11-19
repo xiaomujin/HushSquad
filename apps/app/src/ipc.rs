@@ -254,6 +254,53 @@ pub fn set_ptt(state: State<'_, AppState>, held: bool) -> Result<(), String> {
     state.send(Command::SetPtt(held))
 }
 
+// ---------------------------------------------------------------- 管理（ADR-0016）
+
+/// 把别人移到另一个频道（需要 `MOVE_ANYONE`）。
+#[tauri::command]
+pub fn move_user(state: State<'_, AppState>, user_id: u32, channel_id: u32) -> Result<(), String> {
+    state.send(Command::MoveUser {
+        user_id,
+        channel_id,
+    })
+}
+
+/// 服务器静音 / 闭麦别人（需要 `MUTE_OTHERS`）。
+#[tauri::command]
+pub fn set_user_state(
+    state: State<'_, AppState>,
+    user_id: u32,
+    server_mute: Option<bool>,
+    server_deaf: Option<bool>,
+) -> Result<(), String> {
+    state.send(Command::SetUserState {
+        user_id,
+        server_mute,
+        server_deaf,
+    })
+}
+
+/// 踢出服务器（需要 `KICK`）。
+#[tauri::command]
+pub fn kick_user(state: State<'_, AppState>, user_id: u32, reason: String) -> Result<(), String> {
+    state.send(Command::KickUser { user_id, reason })
+}
+
+/// 请求账号列表（需要 `ADMIN`）。结果走 `Event::Accounts`，不走返回值。
+#[tauri::command]
+pub fn list_users(state: State<'_, AppState>) -> Result<(), String> {
+    state.send(Command::ListUsers)
+}
+
+/// 改某个账号的权限位（需要 `ADMIN`）。
+///
+/// 服务器会再校验一遍「授予的位必须是自己的子集」，所以这里不做二次判断——
+/// 两处判断迟早会不一致，而**服务器那次才算数**。
+#[tauri::command]
+pub fn set_user_perms(state: State<'_, AppState>, user_id: u32, perms: u64) -> Result<(), String> {
+    state.send(Command::SetUserPerms { user_id, perms })
+}
+
 // ---------------------------------------------------------------- 信任
 
 /// 忘掉这台服务器记住的证书指纹与免密 token。

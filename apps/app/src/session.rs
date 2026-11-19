@@ -20,7 +20,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use hushsquad_client::config::Config;
-use hushsquad_client::host::{Command, Host, MetersView, NetView, StateView};
+use hushsquad_client::host::{AccountView, Command, Host, MetersView, NetView, StateView};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
@@ -41,6 +41,15 @@ pub enum Event {
     Meters(MetersView),
     /// 5 s 网络数字。
     Net(NetView),
+    /// 账号列表（管理面板请求之后来一次）。
+    ///
+    /// **必须是结构体变体**：`#[serde(tag = "kind")]` 的内部标记无法序列化
+    /// 「新类型变体里装一个序列」——那种写法会在发送时返回 Err，而调用方是
+    /// `let _ = channel.send(..)`，于是消息**静默消失**（这个坑踩过一次）。
+    Accounts {
+        /// 全部账号（含离线的）。
+        accounts: Vec<AccountView>,
+    },
 }
 
 /// 会话与前端之间的桥：一个通道往外推，一个队列往里拉。
@@ -78,6 +87,12 @@ impl Host for HostRef {
 
     fn net(&self, net: &NetView) {
         let _ = self.0.events.send(Event::Net(net.clone()));
+    }
+
+    fn accounts(&self, accounts: &[AccountView]) {
+        let _ = self.0.events.send(Event::Accounts {
+            accounts: accounts.to_vec(),
+        });
     }
 
     fn command(&self) -> Option<Command> {

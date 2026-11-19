@@ -23,9 +23,9 @@
 //! 关掉匿名登录（`--no-anonymous`）后，未登记的设备会收到明确的 `anonymous_disabled`。
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use server_core::auth::{AuthError, AuthMethod, AuthOutcome, Authenticator};
+use server_core::auth::{AuthError, AuthMethod, AuthOutcome, Authenticator, UserAdmin, UserEntry};
 
 use server_core::UserDb;
 use store::users::{UserRow, UserStore};
@@ -176,6 +176,77 @@ impl Authenticator for SqliteAuth {
                 outcome_of(&row, Vec::new())
             }
         }
+    }
+}
+
+/// 账号管理：管理面板要的两件事。
+///
+/// 与 `Authenticator` 分开实现（理由见 `server-core::auth::UserAdmin`）：登录在握手路径上
+/// 必须快、只读；这里是管理员触发的低频写操作。
+impl UserAdmin for SqliteAuth {
+    fn list_users(&self) -> Result<Vec<UserEntry>, AuthError> {
+        let rows = self
+            .with_store(|store| store.list())
+            .map_err(|_| AuthError::Internal)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(UserEntry {
+                    // 存储层是 i64，协议是 u32。超出范围的行直接跳过，不 panic。
+                    user_id: u32::try_from(row.user_id).ok()?,
+                    username: row.username,
+                    perms: row.perms,
+                    anonymous: row.anonymous,
+                })
+            })
+            .collect())
+    }
+
+    fn set_perms(&self, user_id: u32, perms: u64) -> Result<(), AuthError> {
+        let changed = self
+            .with_store(|store| store.set_perms(i64::from(user_id), perms))
+            .map_err(|_| AuthError::Internal)?;
+        if changed {
+            Ok(())
+        } else {
+            Err(AuthError::UnknownUser)
+        }
+    }
+}
+
+// 服务器要同时拿到「认证器」和「账号管理」，而两者必须是**同一个**实例
+// （否则改完权限，认证读到的还是旧库）。用 `Arc` 共享，再包一层本地类型：
+// `Arc` 不是 fundamental 类型，直接 `impl Trait for Arc<SqliteAuth>` 会撞孤儿规则。
+#[derive(Debug, Clone)]
+pub struct SharedAuth(Arc<SqliteAuth>);
+
+impl SharedAuth {
+    /// 包一层。
+    #[must_use]
+    pub fn new(auth: SqliteAuth) -> Self {
+        Self(Arc::new(auth))
+    }
+
+    /// 拿回底层（CLI 的 adduser / ls / del 与启动时的服主引导用）。
+    #[must_use]
+    pub fn inner(&self) -> &SqliteAuth {
+        &self.0
+    }
+}
+
+impl Authenticator for SharedAuth {
+    fn authenticate(&self, method: AuthMethod<'_>) -> Result<AuthOutcome, AuthError> {
+        self.0.authenticate(method)
+    }
+}
+
+impl UserAdmin for SharedAuth {
+    fn list_users(&self) -> Result<Vec<UserEntry>, AuthError> {
+        self.0.list_users()
+    }
+
+    fn set_perms(&self, user_id: u32, perms: u64) -> Result<(), AuthError> {
+        self.0.set_perms(user_id, perms)
     }
 }
 

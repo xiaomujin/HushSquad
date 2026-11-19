@@ -5,6 +5,7 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
+  Account,
   Backend,
   Channel as ChannelInfo,
   ConnectRequest,
@@ -27,6 +28,8 @@ interface WireState {
   error: string | null;
   self_user_id: number;
   self_channel: number;
+  /** 权限位图（ADR-0016）。 */
+  perms: number;
   muted: boolean;
   deafened: boolean;
   channels: ChannelInfo[];
@@ -49,7 +52,8 @@ interface WireNet {
 type WireEvent =
   | ({ kind: 'state' } & WireState)
   | ({ kind: 'meters' } & Meters)
-  | ({ kind: 'net' } & WireNet);
+  | ({ kind: 'net' } & WireNet)
+  | { kind: 'accounts'; accounts: Account[] };
 
 /** 真后端。 */
 export class TauriBackend implements Backend {
@@ -107,6 +111,33 @@ export class TauriBackend implements Backend {
     await invoke('set_ptt', { held });
   }
 
+  async moveUser(userId: number, channelId: number): Promise<void> {
+    await invoke('move_user', { userId, channelId });
+  }
+
+  async setUserState(
+    userId: number,
+    patch: { server_mute?: boolean; server_deaf?: boolean },
+  ): Promise<void> {
+    await invoke('set_user_state', {
+      userId,
+      serverMute: patch.server_mute,
+      serverDeaf: patch.server_deaf,
+    });
+  }
+
+  async kickUser(userId: number, reason: string): Promise<void> {
+    await invoke('kick_user', { userId, reason });
+  }
+
+  async listUsers(): Promise<void> {
+    await invoke('list_users');
+  }
+
+  async setUserPerms(userId: number, perms: number): Promise<void> {
+    await invoke('set_user_perms', { userId, perms });
+  }
+
   async setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void> {
     await invoke('set_self', { mute: state.mute, deafen: state.deafen });
   }
@@ -150,12 +181,16 @@ export class TauriBackend implements Backend {
         handlers.onPhase(event.phase, event.error ?? undefined);
         handlers.onChannels(event.channels, event.self_channel);
         handlers.onMembers(event.members, event.self_user_id);
+        handlers.onPerms(event.perms);
         break;
       case 'meters':
         handlers.onMeters(event);
         break;
       case 'net':
         handlers.onNet(toNet(event));
+        break;
+      case 'accounts':
+        handlers.onAccounts(event.accounts);
         break;
     }
   }

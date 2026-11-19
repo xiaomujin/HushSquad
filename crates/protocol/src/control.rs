@@ -116,6 +116,13 @@ impl ControlMessage {
             Some(proto::control_message::Kind::Pong(_)) => "pong",
             Some(proto::control_message::Kind::Stats(_)) => "stats",
             Some(proto::control_message::Kind::Error(_)) => "error",
+            Some(proto::control_message::Kind::MoveUser(_)) => "move_user",
+            Some(proto::control_message::Kind::SetUserState(_)) => "set_user_state",
+            Some(proto::control_message::Kind::KickUser(_)) => "kick_user",
+            Some(proto::control_message::Kind::ListUsers(_)) => "list_users",
+            Some(proto::control_message::Kind::UserList(_)) => "user_list",
+            Some(proto::control_message::Kind::SetUserPerms(_)) => "set_user_perms",
+            Some(proto::control_message::Kind::PermsChanged(_)) => "perms_changed",
         }
     }
 }

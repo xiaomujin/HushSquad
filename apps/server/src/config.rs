@@ -26,6 +26,8 @@ pub enum Command {
     Passwd(String),
     /// 删账号。
     DelUser(String),
+    /// 把服主位给某个账号（灾难恢复 / 换人）。
+    Promote(String),
     /// 列账号。
     List,
     /// 重新生成证书。
@@ -42,7 +44,8 @@ pub const USAGE: &str = r"HushSquad 服务器
   hushsquad-server adduser <用户名>       加账号（会问两遍密码）
   hushsquad-server passwd <用户名>        改密码
   hushsquad-server del <用户名>           删账号
-  hushsquad-server ls                     列出账号
+  hushsquad-server promote <用户名>       把服主位给这个账号（换人 / 服主号丢了时用）
+  hushsquad-server ls                     列出账号（含权限）
   hushsquad-server cert                   重新生成自签证书
 
 选项（都有默认值，一般一个都不用给）：
@@ -164,6 +167,7 @@ impl Config {
                 "adduser" => config.command = Command::AddUser(value()?),
                 "passwd" => config.command = Command::Passwd(value()?),
                 "del" => config.command = Command::DelUser(value()?),
+                "promote" => config.command = Command::Promote(value()?),
                 "ls" => config.command = Command::List,
                 "cert" => config.command = Command::Cert,
                 other => return Err(format!("未知参数 {other:?}")),

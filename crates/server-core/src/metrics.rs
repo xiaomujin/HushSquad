@@ -106,6 +106,10 @@ pub struct Metrics {
     pub control_ignored: u64,
     /// 认证失败次数。
     pub auth_failures: u64,
+    /// 越权被拒的管理请求数（ADR-0016：这是唯一一处能看出「有人试着做不该做的事」的地方）。
+    pub permission_denied: u64,
+    /// 被管理员踢出的会话数。
+    pub kicks: u64,
     /// 各类丢弃原因的计数。
     dropped: [u64; DropReason::COUNT],
 }

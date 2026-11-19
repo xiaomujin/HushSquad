@@ -25,6 +25,7 @@ pub mod channel;
 pub mod control;
 pub mod events;
 pub mod metrics;
+pub mod perms;
 pub mod session;
 pub mod voice;
 
@@ -35,7 +36,7 @@ use protocol::VOICE_TOKEN_LEN;
 use protocol::control::proto::Limits;
 use transport::{EXPORTER_LEN, derive_voice_keys};
 
-pub use auth::{AuthMethod, AuthOutcome, Authenticator, UserDb, UserRecord};
+pub use auth::{AuthMethod, AuthOutcome, Authenticator, UserAdmin, UserDb, UserEntry, UserRecord};
 pub use channel::{Channel, ChannelId, UserId};
 pub use control::Action;
 pub use events::{Event, KillReason, MAX_EVENTS};
@@ -99,6 +100,9 @@ impl Default for ServerConfig {
 pub struct Server {
     config: ServerConfig,
     authenticator: Box<dyn Authenticator>,
+    /// 账号管理（列账号、改权限）。与认证器分开：登录要快，管理可以慢、可以失败。
+    /// 没设的时候管理类请求一律回「这个服务器不支持管理操作」。
+    user_admin: Option<Box<dyn UserAdmin>>,
     sessions: BTreeMap<SessionId, Session>,
     by_addr: BTreeMap<SocketAddr, SessionId>,
     by_token: BTreeMap<[u8; VOICE_TOKEN_LEN], SessionId>,
@@ -141,6 +145,7 @@ impl Server {
         Self {
             unbound_rate: RateMeter::new(config.max_voice_pps),
             authenticator: Box::new(UserDb::new()),
+            user_admin: None,
             config,
             sessions: BTreeMap::new(),
             by_addr: BTreeMap::new(),
@@ -197,6 +202,17 @@ impl Server {
     #[must_use]
     pub fn authenticator(&self) -> &dyn Authenticator {
         &*self.authenticator
+    }
+
+    /// 装一个账号管理后端（列账号 / 改权限）。
+    pub fn set_user_admin(&mut self, admin: Box<dyn UserAdmin>) {
+        self.user_admin = Some(admin);
+    }
+
+    /// 账号管理后端。
+    #[must_use]
+    pub fn user_admin(&self) -> Option<&dyn UserAdmin> {
+        self.user_admin.as_deref()
     }
 
     /// 配置。

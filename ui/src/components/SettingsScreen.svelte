@@ -1,8 +1,32 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
-  import { app } from '../lib/state.svelte';
+  import { ROLES, roleOf } from '../lib/ipc';
+  import { app, PERM } from '../lib/state.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
+
+  const canAdmin = $derived(app.can(PERM.ADMIN));
+  /** 下拉里能选的角色：服主位只能由服主转移，不放进下拉。 */
+  const assignable = ROLES.filter((role) => role.id !== 'owner');
+
+  /** 服务器页：一打开就拉一次账号列表（含离线的）。 */
+  $effect(() => {
+    if (app.settingsTab === 'server' && canAdmin) {
+      void backend.listUsers().catch(() => {});
+    }
+  });
+
+  async function setRole(userId: number, perms: number): Promise<void> {
+    try {
+      await backend.setUserPerms(userId, perms);
+      // 服务器会把 PermsChanged 发给本人和所有管理员，但**不广播别人的**权限，
+      // 所以这里主动再拉一次，让面板上别人的角色也立刻变。
+      await backend.listUsers();
+      failure = '';
+    } catch (error) {
+      failure = String(error);
+    }
+  }
 
   type Tier = { id: string; name: string; desc: string; latency: string; cpu: string };
   const tiers: Tier[] = [
@@ -60,12 +84,72 @@
 
   <div class="set-body">
     <nav class="set-nav">
-      <div class="it on">音频</div>
-      <div class="it">网络</div>
-      <div class="it">关于</div>
+      <button class="it" class:on={app.settingsTab === 'audio'} onclick={() => (app.settingsTab = 'audio')}>音频</button>
+      <button class="it" disabled>网络</button>
+      <button
+        class="it"
+        class:on={app.settingsTab === 'server'}
+        class:off={!canAdmin}
+        title={canAdmin ? '' : '需要管理员权限'}
+        disabled={!canAdmin}
+        onclick={() => (app.settingsTab = 'server')}
+      >
+        服务器
+      </button>
+      <button class="it" disabled>关于</button>
     </nav>
 
-    <div class="set-main">
+    {#if app.settingsTab === 'server'}
+      <div class="set-main">
+        <h2>服务器</h2>
+        <div class="group">
+          <div class="g-h">账号与角色</div>
+          {#if !canAdmin}
+            <div class="tiny">只有管理员能看这一页。</div>
+          {:else if app.accounts.length === 0}
+            <div class="tiny">还没有账号，或者这台服务器没接账号管理。</div>
+          {:else}
+            <table class="acct">
+              <thead>
+                <tr><th>用户名</th><th>状态</th><th>角色</th><th>位</th></tr>
+              </thead>
+              <tbody>
+                {#each app.accounts as a (a.user_id)}
+                  <tr class:focus={a.user_id === app.accountsFocus}>
+                    <td>
+                      {a.name}
+                      {#if a.anonymous}<span class="badge">匿名</span>{/if}
+                    </td>
+                    <td class="mono">{a.online ? '● 在线' : '○ 离线'}</td>
+                    <td>
+                      {#if a.perms & 256}
+                        <span class="mono">服主</span>
+                      {:else}
+                        <select
+                          value={roleOf(a.perms)?.perms ?? ''}
+                          onchange={(event) => setRole(a.user_id, Number(event.currentTarget.value))}
+                        >
+                          {#if !roleOf(a.perms)}<option value="">自定义（{a.perms}）</option>{/if}
+                          {#each assignable as role (role.id)}
+                            <option value={role.perms}>{role.label}</option>
+                          {/each}
+                        </select>
+                      {/if}
+                    </td>
+                    <td class="mono">{a.perms}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <div class="tiny" style="max-width:640px;margin-top:8px">
+              角色只决定能做什么。<b style="color:var(--tx2)">服务器对每次操作都会重新校验</b>，
+              改权限不需要重启。服主位只能由服主转移，所以下拉里没有这一项。
+            </div>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <div class="set-main">
       <h2>音频</h2>
 
       <div class="group">
@@ -193,6 +277,7 @@
         <span style="font-size:14px;line-height:1.2">⚠</span>
         <div><b>检测到蓝牙耳麦。</b>回传麦克风会切到 SCO，延迟与音质都会下降。要低延迟请用有线或 USB 耳机——蓝牙只保证「能用」。</div>
       </div>
-    </div>
+      </div>
+    {/if}
   </div>
 </div>

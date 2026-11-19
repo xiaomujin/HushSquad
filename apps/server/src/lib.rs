@@ -30,7 +30,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use auth::SqliteAuth;
+pub use auth::{SharedAuth, SqliteAuth};
 use config::{Command, Config};
 use server_core::{Server, UserDb};
 
@@ -96,6 +96,7 @@ fn dispatch(config: Config) -> Result<(), String> {
         Command::AddUser(name) => add_user(&config, &name),
         Command::Passwd(name) => set_password(&config, &name),
         Command::DelUser(name) => delete_user(&config, &name),
+        Command::Promote(name) => promote(&config, &name),
         Command::List => list_users(&config),
         Command::Cert => regenerate_cert(&config),
     }
@@ -134,21 +135,93 @@ fn read_password(prompt: &str, confirm: bool) -> Result<String, String> {
     Ok(password)
 }
 
-fn open_store(config: &Config) -> Result<SqliteAuth, String> {
-    SqliteAuth::open(&config.db, config.allow_anonymous, config.max_anonymous)
+fn open_store(config: &Config) -> Result<SharedAuth, String> {
+    SqliteAuth::open(&config.db, config.allow_anonymous, config.max_anonymous).map(SharedAuth::new)
+}
+
+/// 保证这台服务器有一个服主。
+///
+/// 库里一个带 `OWNER` 位的账号都没有时，把**最早建的非匿名账号**提上去，并打印一行说明。
+/// 覆盖两种场景：
+///
+/// - 全新部署：`adduser` 建的第一个账号就是服主，不需要用户去理解「权限位」；
+/// - 老库升级：以前没有服主这个概念，升级后自动指定一个，而不是让服务器变成没人能管。
+///
+/// 返回被提上去的用户名（本来就有服主时返回 `None`）。
+fn ensure_owner(auth: &SharedAuth) -> Result<Option<String>, String> {
+    use server_core::perms;
+    let store = auth.inner();
+    let has_owner = store
+        .with_store(|store| store.any_with_perms(perms::OWNER))
+        .map_err(|e| e.to_string())?;
+    if has_owner {
+        return Ok(None);
+    }
+    let Some(row) = store
+        .with_store(|store| store.first_real_user())
+        .map_err(|e| e.to_string())?
+    else {
+        // 一个非匿名账号都没有（只有游客）。等第一个 adduser。
+        return Ok(None);
+    };
+    store
+        .with_store(|store| store.set_perms(row.user_id, perms::OWNER_ROLE))
+        .map_err(|e| e.to_string())?;
+    Ok(Some(row.username))
 }
 
 fn add_user(config: &Config, name: &str) -> Result<(), String> {
     let auth = open_store(config)?;
-    let exists = auth.with_store(|store| store.find(name).ok().flatten().is_some());
+    let exists = auth
+        .inner()
+        .with_store(|store| store.find(name).ok().flatten().is_some());
     if exists {
         return Err(format!("用户 {name} 已经存在；改密码请用 passwd {name}"));
     }
     let password = read_password(&format!("给 {name} 设密码："), true)?;
     let hash = UserDb::hash_password(&password).map_err(|e| format!("算哈希失败：{e}"))?;
-    auth.with_store(|store| store.add_user(name, &hash, 1))
+    auth.inner()
+        .with_store(|store| store.add_user(name, &hash, server_core::perms::MEMBER))
         .map_err(|e| e.to_string())?;
-    println!("已创建账号 {name}（权限位 1：可进频道）");
+    println!("已创建账号 {name}（成员：可以进频道）");
+    if let Some(owner) = ensure_owner(&auth)? {
+        println!("{owner} 是这个服务器的服主（可以给其他人分配权限）");
+    }
+    Ok(())
+}
+
+/// 把服主位给某个账号（灾难恢复：服主账号丢了、要换人）。
+fn promote(config: &Config, name: &str) -> Result<(), String> {
+    use server_core::perms;
+    let auth = open_store(config)?;
+    let store = auth.inner();
+    let Some(target) = store
+        .with_store(|store| store.find(name))
+        .map_err(|e| e.to_string())?
+    else {
+        return Err(format!("没有 {name} 这个账号"));
+    };
+    if target.anonymous {
+        return Err(format!(
+            "{name} 是匿名账号（只能用设备号登录），服主位不能给它"
+        ));
+    }
+    // 先把旧的服主位清掉：服主唯一。
+    for row in store
+        .with_store(|store| store.list())
+        .map_err(|e| e.to_string())?
+    {
+        if row.user_id != target.user_id && row.perms & perms::OWNER != 0 {
+            store
+                .with_store(|store| store.set_perms(row.user_id, row.perms & !perms::OWNER))
+                .map_err(|e| e.to_string())?;
+            println!("{} 不再是服主（降为管理员）", row.username);
+        }
+    }
+    store
+        .with_store(|store| store.set_perms(target.user_id, perms::OWNER_ROLE))
+        .map_err(|e| e.to_string())?;
+    println!("{name} 现在是这个服务器的服主");
     Ok(())
 }
 
@@ -157,6 +230,7 @@ fn set_password(config: &Config, name: &str) -> Result<(), String> {
     let password = read_password(&format!("给 {name} 设新密码："), true)?;
     let hash = UserDb::hash_password(&password).map_err(|e| format!("算哈希失败：{e}"))?;
     let changed = auth
+        .inner()
         .with_store(|store| store.set_password(name, &hash))
         .map_err(|e| e.to_string())?;
     if !changed {
@@ -167,8 +241,20 @@ fn set_password(config: &Config, name: &str) -> Result<(), String> {
 }
 
 fn delete_user(config: &Config, name: &str) -> Result<(), String> {
+    use server_core::perms;
     let auth = open_store(config)?;
-    let removed = auth
+    let store = auth.inner();
+    // 删掉服主会让服务器变成没人能管的状态。要删就先换人。
+    if let Some(row) = store
+        .with_store(|store| store.find(name))
+        .map_err(|e| e.to_string())?
+        && row.perms & perms::OWNER != 0
+    {
+        return Err(format!(
+            "{name} 是服主，不能直接删。先用 promote <用户名> 把服主位给别人才行"
+        ));
+    }
+    let removed = store
         .with_store(|store| store.remove(name))
         .map_err(|e| e.to_string())?;
     if !removed {
@@ -180,7 +266,8 @@ fn delete_user(config: &Config, name: &str) -> Result<(), String> {
 
 fn list_users(config: &Config) -> Result<(), String> {
     let auth = open_store(config)?;
-    let (rows, anonymous) = auth.with_store(|store| {
+    let store = auth.inner();
+    let (rows, anonymous) = store.with_store(|store| {
         (
             store.list().unwrap_or_default(),
             store.anonymous_count().unwrap_or(0),
@@ -190,15 +277,16 @@ fn list_users(config: &Config) -> Result<(), String> {
         println!("一个账号都没有。用 hushsquad-server adduser <用户名> 建一个。");
         return Ok(());
     }
-    println!("{:<6} {:<24} {:<8} 说明", "id", "用户名", "类型");
+    println!("{:<6} {:<24} {:<8} 权限", "id", "用户名", "类型");
     for row in &rows {
         let kind = if row.anonymous { "匿名" } else { "密码" };
-        let note = if row.password_hash.is_empty() {
-            "只能用绑定的设备号登录"
-        } else {
-            ""
-        };
-        println!("{:<6} {:<24} {:<8} {note}", row.user_id, row.username, kind);
+        println!(
+            "{:<6} {:<24} {:<8} {}",
+            row.user_id,
+            row.username,
+            kind,
+            server_core::perms::describe(row.perms)
+        );
     }
     println!("共 {} 个账号，其中匿名 {anonymous} 个", rows.len());
     Ok(())
@@ -218,6 +306,8 @@ pub fn run(config: Config) -> Result<(), String> {
     let auth = open_store(&config)?;
     let info = cert::ensure(&config.cert, &config.key)?;
     let tls = control::load_tls(&config.cert, &config.key)?;
+    // 老库升级：以前没有「服主」这个概念，这里补一个，否则服务器没人能管。
+    let promoted = ensure_owner(&auth)?;
 
     // 语音面地址：没显式给就猜一个局域网 IP —— 猜错了客户端只会连不上语音面，
     // 启动横幅里那句「对外宣告」能让用户一眼看出该改哪里。
@@ -245,7 +335,9 @@ pub fn run(config: Config) -> Result<(), String> {
             voice_port,
             ..server_core::ServerConfig::default()
         });
-        server.set_authenticator(Box::new(auth));
+        // 认证器与账号管理必须是**同一个**实例：改完权限，认证读到的得是新库。
+        server.set_authenticator(Box::new(auth.clone()));
+        server.set_user_admin(Box::new(auth.clone()));
         for name in &config.channels {
             server.add_channel(0, name.clone());
         }
@@ -286,6 +378,9 @@ pub fn run(config: Config) -> Result<(), String> {
         );
         if info.generated {
             println!("            （刚生成；客户端第一次连会自动记住它）");
+        }
+        if let Some(owner) = &promoted {
+            println!("  服主      {owner}（库里原本没有服主，自动提的；用 promote 换人）");
         }
 
         metrics_loop(Arc::clone(&shared), control).await;

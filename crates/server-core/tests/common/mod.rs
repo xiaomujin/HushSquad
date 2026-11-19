@@ -34,6 +34,85 @@ pub fn server_with_auth(auth: Box<dyn Authenticator>) -> Server {
     server
 }
 
+/// 账号管理的内存实现（测试用）。
+///
+/// 生产里是 SQLite（`apps/server` 的 `SqliteAuth`），但权限判定的逻辑全在
+/// `server-core`，所以这里用一张表就能把「谁能改谁」测干净。
+///
+/// `Clone` 是共享的（`Arc<Mutex<_>>`）：测试把一份塞进服务器，自己留一份看结果。
+#[derive(Debug, Clone, Default)]
+pub struct MemAdmin {
+    users: std::sync::Arc<std::sync::Mutex<Vec<server_core::UserEntry>>>,
+}
+
+impl MemAdmin {
+    /// 按 `(user_id, 用户名, 权限位)` 建。
+    #[must_use]
+    pub fn new(rows: &[(u32, &str, u64)]) -> Self {
+        Self {
+            users: std::sync::Arc::new(std::sync::Mutex::new(
+                rows.iter()
+                    .map(|(user_id, username, perms)| server_core::UserEntry {
+                        user_id: *user_id,
+                        username: (*username).to_owned(),
+                        perms: *perms,
+                        anonymous: false,
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    /// 现在的权限位（断言用）。
+    #[must_use]
+    pub fn perms_of(&self, user_id: u32) -> u64 {
+        self.users
+            .lock()
+            .expect("锁没中毒")
+            .iter()
+            .find(|entry| entry.user_id == user_id)
+            .map_or(0, |entry| entry.perms)
+    }
+}
+
+impl server_core::UserAdmin for MemAdmin {
+    fn list_users(&self) -> Result<Vec<server_core::UserEntry>, server_core::auth::AuthError> {
+        Ok(self.users.lock().expect("锁没中毒").clone())
+    }
+
+    fn set_perms(&self, user_id: u32, perms: u64) -> Result<(), server_core::auth::AuthError> {
+        let mut users = self.users.lock().expect("锁没中毒");
+        let Some(entry) = users.iter_mut().find(|entry| entry.user_id == user_id) else {
+            return Err(server_core::auth::AuthError::UnknownUser);
+        };
+        entry.perms = perms;
+        Ok(())
+    }
+}
+
+/// alice 是服主、bob 是管理员、carol 是成员。权限相关的测试都用它。
+///
+/// 返回账号库的一份把手：权限改动落在这里，测试可以直接断言「库里现在是什么」，
+/// 而不是只看服务器回了什么消息。
+#[must_use]
+pub fn roles() -> (Server, MemAdmin) {
+    use server_core::perms;
+    let mut db = UserDb::new();
+    db.add_user(1, "alice", "alice-pw", perms::OWNER_ROLE)
+        .unwrap();
+    db.add_user(2, "bob", "bob-pw", perms::ADMIN_ROLE).unwrap();
+    db.add_user(3, "carol", "carol-pw", perms::MEMBER).unwrap();
+    let admin = MemAdmin::new(&[
+        (1, "alice", perms::OWNER_ROLE),
+        (2, "bob", perms::ADMIN_ROLE),
+        (3, "carol", perms::MEMBER),
+    ]);
+    let mut server = Server::new(ServerConfig::default());
+    server.set_authenticator(Box::new(db));
+    server.set_user_admin(Box::new(admin.clone()));
+    (server, admin)
+}
+
 fn hello() -> ControlMessage {
     ControlMessage {
         protocol: 1,

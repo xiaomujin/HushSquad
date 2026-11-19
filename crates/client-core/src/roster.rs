@@ -91,6 +91,11 @@ pub struct Roster {
     channels: BTreeMap<u32, ChannelInfo>,
     members: BTreeMap<u32, Member>,
     self_user_id: u32,
+    /// 自己的权限位图（认证时下发，`PermsChanged` 时更新）。
+    ///
+    /// 客户端**只**用它决定界面（菜单要不要出现、哪些项灰掉）。真正的校验在服务器，
+    /// 这里存错了最多是多显示一个点了没反应的按钮，不会多给一分权限（ADR-0016）。
+    self_perms: u64,
 }
 
 impl Roster {
@@ -104,6 +109,12 @@ impl Roster {
     #[must_use]
     pub const fn self_user_id(&self) -> u32 {
         self.self_user_id
+    }
+
+    /// 自己的权限位图。
+    #[must_use]
+    pub const fn self_perms(&self) -> u64 {
+        self.self_perms
     }
 
     /// 自己的成员记录。
@@ -172,6 +183,15 @@ impl Roster {
             }
             Some(Kind::AuthResult(result)) if result.ok => {
                 self.self_user_id = result.user_id;
+                self.self_perms = result.perms;
+                true
+            }
+            Some(Kind::PermsChanged(changed)) => {
+                if changed.user_id != self.self_user_id {
+                    // v1 只收自己的权限变更（服务器不会广播别人的）。
+                    return false;
+                }
+                self.self_perms = changed.perms;
                 true
             }
             Some(Kind::ChannelAdded(added)) => {
