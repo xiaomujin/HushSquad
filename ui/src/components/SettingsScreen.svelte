@@ -50,8 +50,74 @@
     try {
       await backend.setVoice(app.voice);
       failure = '';
+      // 换模式会连带注册 / 注销全局按键，注册状态要跟着刷新。
+      await refreshPtt();
     } catch (error) {
       failure = String(error);
+    }
+  }
+
+  // ---------------------------------------------------------------- 按键说话（B1）
+  //
+  // 键的真身在 Rust 侧：它注册全局热键、落库、换模式时注销。这里只做两件事：
+  // 显示当前的键、把用户按下的组合拼成插件认的写法交给它。
+  let capturing = $state(false);
+  let keyError = $state('');
+
+  async function refreshPtt(): Promise<void> {
+    try {
+      const settings = await backend.pttSettings();
+      app.pttKey = settings.key;
+      app.pttHasModifier = settings.has_modifier;
+      app.pttRegistered = settings.registered;
+    } catch {
+      // 读不到就不显示注册状态，不影响说话。
+    }
+  }
+
+  /**
+   * 把一次 keydown 拼成插件认的组合写法。
+   *
+   * 用 `event.code`（物理键位）而不是 `key`：`key` 会随输入法、Shift、键盘布局变，
+   * 而全局热键是按物理键注册的。修饰键单独按下时返回 `null`，等真正的主键。
+   */
+  function specOf(event: KeyboardEvent): string | null {
+    if (/^(Control|Shift|Alt|Meta)(Left|Right)$/.test(event.code)) return null;
+    const parts: string[] = [];
+    if (event.ctrlKey) parts.push('Ctrl');
+    if (event.altKey) parts.push('Alt');
+    if (event.shiftKey) parts.push('Shift');
+    if (event.metaKey) parts.push('Super');
+    parts.push(event.code);
+    return parts.join('+');
+  }
+
+  function onCaptureKey(event: KeyboardEvent): void {
+    if (!capturing) return;
+    // 捕获期间把按键全吃掉：否则按 Ctrl+Shift+K 会顺手触发别的快捷键。
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.code === 'Escape') {
+      capturing = false;
+      return;
+    }
+    if (event.repeat) return;
+    const spec = specOf(event);
+    if (spec === null) return;
+    capturing = false;
+    void captureKey(spec);
+  }
+
+  async function captureKey(spec: string): Promise<void> {
+    keyError = '';
+    try {
+      const display = await backend.setPttKey(spec);
+      app.pttKey = display;
+      app.pttHasModifier = display.includes('+');
+      await refreshPtt();
+    } catch (error) {
+      keyError = String(error);
+      await refreshPtt();
     }
   }
 
@@ -70,6 +136,9 @@
   const vad = $derived(app.meters.vad ?? 0);
   const gate = $derived(app.meters.gate ?? false);
 </script>
+
+<!-- 改键时把按键全吃掉：只在 capturing 为真时生效，平时不拦任何键。 -->
+<svelte:window onkeydown={onCaptureKey} />
 
 <div class="settings">
   <header class="top">
@@ -203,9 +272,52 @@
           <div class="tiny" style="max-width:620px">
             <b style="color:var(--tx2)">语音激活</b>：检测到你在说话才发，静默时每 200 ms 只发一个保活标记；开门时补发前 30 ms，不吃爆破音的起头。
             <b style="color:var(--tx2)">常开</b>：一直发，对方能听到键盘、风扇、呼吸——只适合安静房间加耳麦。
-            <b style="color:var(--tx2)">按住说话</b>：最可控，但对局里手忙。三种模式下都能用 <span class="mono">Space</span> 强制发送。
+            <b style="color:var(--tx2)">按住说话</b>：最可控，但对局里手忙。按住你设的键才发，松手当帧就停。
           </div>
         </div>
+        <div class="field">
+          <span class="lb">按键</span>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <button
+              class="btn"
+              class:on={capturing}
+              onclick={() => {
+                capturing = true;
+                keyError = '';
+              }}
+            >
+              {capturing ? '按下你要用的键…' : app.pttKey}
+            </button>
+            <span class="chip" class:live={app.pttRegistered}>
+              {app.pttRegistered ? '已注册 · 任何窗口都有效' : '未注册'}
+            </span>
+            {#if capturing}
+              <span class="tiny">Esc 取消</span>
+            {/if}
+          </div>
+        </div>
+        <div class="field">
+          <span class="lb"></span>
+          <div class="tiny" style="max-width:620px">
+            按键只属于<b style="color:var(--tx2)">按住说话</b>：换成语音激活或常开，这个键会被系统收回去，按它什么都不会发生。
+            它是<b style="color:var(--tx2)">全局</b>热键——任何程序在前台都有效（人在游戏里也能说话），代价是那个组合在别处就没了：
+            别用空格或单个字母，否则别处就打不出它。
+          </div>
+        </div>
+        {#if !app.pttHasModifier}
+          <div class="field">
+            <span class="lb"></span>
+            <div class="tiny" style="color:var(--warn)">
+              ⚠「{app.pttKey}」没有修饰键：它在所有程序里都会被抢走。
+            </div>
+          </div>
+        {/if}
+        {#if keyError}
+          <div class="field">
+            <span class="lb"></span>
+            <div class="tiny" style="color:var(--warn)">改键失败：{keyError}</div>
+          </div>
+        {/if}
         <div class="field">
           <span class="lb">灵敏度</span>
           <div style="display:flex;align-items:center;gap:12px">

@@ -6,6 +6,18 @@
   import { backend } from './lib/backend';
   import { app } from './lib/state.svelte';
 
+  /** 把 Rust 侧的按键状态读回来。注册与否只有那边知道（它掌握说话方式与会话）。 */
+  async function refreshPtt(): Promise<void> {
+    try {
+      const settings = await backend.pttSettings();
+      app.pttKey = settings.key;
+      app.pttHasModifier = settings.has_modifier;
+      app.pttRegistered = settings.registered;
+    } catch {
+      // 读不到就当没有：界面上不显示注册状态，不影响说话。
+    }
+  }
+
   // 后端事件 → 镜像。低频事件走这里；高频电平也在同一条流上（Tauri 侧是 Channel<T>）。
   backend.subscribe({
     onPhase(phase, error) {
@@ -16,6 +28,11 @@
       if (phase === 'disconnected' || phase === 'error') {
         app.selfMute = false;
         app.deafen = false;
+        // 会话没了，Rust 侧会把全局热键注销掉（见 apps/app/src/ptt.rs）。
+        app.pttRegistered = false;
+      } else if (phase === 'in_channel') {
+        // 连上了才会注册按键：按住说话需要一条活着的会话。
+        void refreshPtt();
       }
     },
     onChannels(channels, selfChannel) {
@@ -75,33 +92,14 @@
   });
   const inRoom = $derived(app.phase === 'in_channel' || app.phase === 'joining' || app.phase === 'reconnecting');
 
-  // Space = 强制发送（三种说话方式下都有效，这是设置页给用户的承诺）。
+  // 按键说话（B1）：界面**不监听键盘**。
   //
-  // 这里**抢走**了空格：焦点在按钮上时空格不再「按下那个按钮」。语音软件里这是通行
-  // 做法（按一下空格就把整个房间的按键节奏打乱更糟），但代价要说清楚：只用键盘的人
-  // 只能用 Enter 触发按钮。输入框里打字不受影响。
+  // 窗口没焦点时（人在游戏里）前端根本收不到 keydown，而那正是按住说话要解决的场景。
+  // 所以按键的注册与「按下 / 松开」都在 Rust 侧（`apps/app/src/ptt.rs` 的全局热键），
+  // 这里只把当前绑定的键读回来显示。顺带一提，原来那段「任何模式下 Space 都强制发送」
+  // 的监听已经删掉——按键现在只属于按住说话，见 `audio_core::gate` 的模块文档。
   $effect(() => {
-    const typing = (target: EventTarget | null): boolean =>
-      target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
-    const down = (event: KeyboardEvent): void => {
-      if (event.code !== 'Space' || event.repeat || typing(event.target)) return;
-      event.preventDefault();
-      if (!inRoom) return;
-      // 没连上时后端会报「还没有连接」；这不是错误，用户只是还没进房间。
-      void backend.setPtt(true).catch(() => {});
-    };
-    const up = (event: KeyboardEvent): void => {
-      if (event.code !== 'Space' || typing(event.target)) return;
-      event.preventDefault();
-      if (!inRoom) return;
-      void backend.setPtt(false).catch(() => {});
-    };
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
-    return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
-    };
+    void refreshPtt();
   });
 </script>
 

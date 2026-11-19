@@ -121,7 +121,10 @@ pub struct Session {
 
 impl Session {
     /// 起一条会话。立即返回：握手在后台线程上做，进度经 `events` 推出去。
-    pub fn start(cfg: Config, events: Channel<Event>) -> Self {
+    ///
+    /// `app` 只用来在会话自己结束之后收尾（把全局按键注销掉）——会话可能是被服务器
+    /// 关掉的，界面那边只会看到 `phase = error`，没人会记得来注销热键。
+    pub fn start(cfg: Config, events: Channel<Event>, app: tauri::AppHandle) -> Self {
         let bridge = Arc::new(Bridge {
             events,
             commands: Mutex::new(VecDeque::new()),
@@ -147,6 +150,7 @@ impl Session {
                     eprintln!("会话结束：{error}");
                 }
                 watcher.finished.store(true, Ordering::Release);
+                crate::ptt::on_session_finished(&app);
             })
             .ok();
         Self { bridge, thread }

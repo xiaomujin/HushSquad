@@ -38,9 +38,20 @@
       <div class="ptt-hint warn">重连中，暂不发送</div>
     {:else if selfMute}
       <div class="ptt-hint">静音优先于任何按键 · 点这里取消</div>
+    {:else if app.voice.mode === 'ptt'}
+      <!-- 按住说话：提示里给的是**真注册上的那个键**（全局热键，窗口没焦点也算数）。 -->
+      <div class="ptt-hint" class:warn={!app.pttRegistered}>
+        {#if app.pttRegistered}
+          按住 <kbd>{app.pttKey}</kbd> 说话 · 松手就停
+        {:else}
+          按键没注册上（可能被别的程序占了）· 去设置里换一个
+        {/if}
+      </div>
+    {:else if app.voice.mode === 'open'}
+      <div class="ptt-hint">常开 · 一直在发，对方听得到你的键盘和风扇</div>
     {:else}
       <div class="ptt-hint">
-        安静 · 门限 {app.voice.threshold_db} dBFS · 按住 <kbd>Space</kbd> 强制发送
+        安静 · 门限 {app.voice.threshold_db} dBFS · 说话才发
       </div>
     {/if}
   </div>

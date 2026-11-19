@@ -28,6 +28,14 @@
 //! 代价是「说完之后还会再发 300 ms 的安静」——那是真实存在的安静，不是噪声，也不占
 //! 什么带宽（Opus 对静音帧的编码只有十几个字节）。
 //!
+//! # 按键属于「按住说话」，不是全局旁路
+//!
+//! 按住说话模式只认按键（[`TxGate::set_ptt`]）；语音激活与常开**完全不看**它。
+//! 曾经的做法是「三种模式下按住都强制发送」，代价是语音激活里按一下键就能顶开
+//! 一扇本该由 VAD 决定的门 —— 那样「说话方式」这四个字就名不副实了。现在的规矩：
+//! 按键是按住说话这个模式的输入设备，换到别的模式它就不存在（界面上那颗热键也会
+//! 被注销，见 `apps/app/src/ptt.rs`）。
+//!
 //! # 预缓冲不在这个模块里
 //!
 //! 开门前的 30 ms 要补发（否则切掉爆破音的起头），但**补发是发送侧的事**：它要一个
@@ -119,7 +127,7 @@ pub struct TxGate {
     above: u32,
     /// 连续不达标的帧数（关门计数）。
     below: u32,
-    /// 「按住」是不是按着（PTT 与强制发送共用）。
+    /// 「按住」是不是按着。**只有按住说话模式看它**。
     ptt: bool,
     /// 上一帧的 VAD 概率与电平，给界面看。
     vad: f32,
@@ -168,15 +176,20 @@ impl TxGate {
         self.cfg.vad_floor = vad_floor;
     }
 
-    /// 按住 / 松开。任何模式下按住都强制开门（设置页里那句「三种模式下都能用 Space 强制发送」）。
+    /// 按住 / 松开。
+    ///
+    /// **只在 [`VoiceMode::Ptt`] 下有意义**：语音激活与常开模式不看这个标志，按住键
+    /// 也不会多发一个字节（`the_key_does_nothing_outside_ptt_mode`）。曾经的做法是
+    /// 「三种模式下按住都强制发送」，那让「语音激活」变成一个随时能被按键顶开的门——
+    /// 说话方式就名不副实了。按键是按住说话的输入设备，不是全局的旁路。
     pub fn set_ptt(&mut self, held: bool) {
         self.ptt = held;
     }
 
     /// 强制关门并清计数（自己静音时用：解静音之后要重新判，不能带着旧状态继续发）。
     ///
-    /// **不动**「按住」的状态：按着 Space 去点了静音、再取消静音，手还在键上，
-    /// 那就该继续强制发送。`reset` 清的是判定，不是按键。
+    /// **不动**「按住」的状态：按着键去点了静音、再取消静音，手还在键上，
+    /// 那就该继续发。`reset` 清的是判定，不是按键。
     pub fn reset(&mut self) {
         self.open = false;
         self.above = 0;
@@ -208,18 +221,13 @@ impl TxGate {
         self.vad = vad;
 
         match self.cfg.mode {
-            // 常开：不看电平也不看 VAD。按住说话没有意义（本来就是一直发）。
+            // 常开：不看电平也不看 VAD。按键在这里也没有意义（本来就是一直发）。
             VoiceMode::Open => self.open = true,
             // 按住说话：只看按键。松手立刻停——那 300 ms 的尾巴在这里是噪音。
             VoiceMode::Ptt => self.open = self.ptt,
             VoiceMode::Vad => {
                 let speech = peak_db >= self.cfg.threshold_db && vad >= self.cfg.vad_floor;
-                if self.ptt {
-                    // 强制发送：立即开，不等 attack，也不管电平。
-                    self.open = true;
-                    self.above = self.cfg.attack_frames.max(1);
-                    self.below = 0;
-                } else if self.open {
+                if self.open {
                     if speech {
                         self.below = 0;
                     } else {
@@ -359,19 +367,23 @@ mod tests {
     }
 
     #[test]
-    fn forced_send_opens_any_mode_immediately() {
+    fn the_key_does_nothing_outside_ptt_mode() {
+        // 语音激活：按住不放也照样由 VAD 说了算。这条钉的是「按键不是全局旁路」。
         let mut gate = TxGate::new(GateConfig::default());
-        assert!(!step(&mut gate, -90.0, 0.0));
         gate.set_ptt(true);
-        assert!(
-            step(&mut gate, -90.0, 0.0),
-            "按住是强制，不看电平也不看 VAD"
-        );
-        gate.set_ptt(false);
         for _ in 0..40 {
-            step(&mut gate, -90.0, 0.0);
+            assert!(!step(&mut gate, -90.0, 0.0), "静音时按住也不该开门");
         }
-        assert!(!gate.is_open(), "松开之后回到正常判定");
+        assert!(!step(&mut gate, -20.0, 0.9), "第 1 帧还在 attack 窗口里");
+        assert!(step(&mut gate, -20.0, 0.9), "有声才开，与按键无关");
+
+        // 常开：松开也不会停。按键在这个模式下没有任何含义。
+        let mut gate = TxGate::new(GateConfig {
+            mode: VoiceMode::Open,
+            ..GateConfig::default()
+        });
+        gate.set_ptt(false);
+        assert!(step(&mut gate, -90.0, 0.0));
     }
 
     #[test]
@@ -389,12 +401,15 @@ mod tests {
 
     #[test]
     fn reset_forgets_the_decision_but_keeps_the_key() {
-        let mut gate = TxGate::new(GateConfig::default());
+        let mut gate = TxGate::new(GateConfig {
+            mode: VoiceMode::Ptt,
+            ..GateConfig::default()
+        });
         gate.set_ptt(true);
         assert!(gate.step(-20.0, 1.0).send);
         gate.reset();
         assert!(!gate.is_open(), "reset 之后要重新判");
-        // 手还按在键上：reset 不该把强制发送也清掉。
+        // 手还按在键上：reset 不该把按键状态也清掉。
         assert!(gate.step(-90.0, 0.0).send, "reset 不清「按住」");
     }
 

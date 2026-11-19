@@ -14,6 +14,7 @@ import type {
   Meters,
   Net,
   Phase,
+  PttSettings,
   View,
   VoiceSettings,
 } from './ipc';
@@ -140,6 +141,20 @@ export class TauriBackend implements Backend {
 
   async setPtt(held: boolean): Promise<void> {
     await invoke('set_ptt', { held });
+  }
+
+  /**
+   * 按键说话（B1）。
+   *
+   * 注册 / 注销全在 Rust 侧：按住说话模式下连上服务器就注册，换走或断线就注销。
+   * 界面这边只能「读状态」和「换键」——它连 keydown 都收不到（窗口没焦点时）。
+   */
+  async pttSettings(): Promise<PttSettings> {
+    return invoke<PttSettings>('ptt_settings');
+  }
+
+  async setPttKey(key: string): Promise<string> {
+    return invoke<string>('set_ptt_key', { key });
   }
 
   async moveUser(userId: number, channelId: number): Promise<void> {

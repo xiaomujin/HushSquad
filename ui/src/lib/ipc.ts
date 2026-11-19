@@ -156,6 +156,21 @@ export interface VoiceSettings {
   preroll_frames: number;
 }
 
+/**
+ * 按键说话的设置（B1）。
+ *
+ * 按键是**按住说话**这个模式的输入设备：换到语音激活或常开，热键会被注销，
+ * 按它什么都不会发生（门控也忽略它，见 `audio_core::gate`）。
+ */
+export interface PttSettings {
+  /** 显示用的写法（`Ctrl+Shift+Space`）。 */
+  key: string;
+  /** 有没有修饰键。没有的话这个键会在**所有**程序里被抢走，界面上要红字提醒。 */
+  has_modifier: boolean;
+  /** 现在注册着吗（= 按住说话模式 + 已连接）。 */
+  registered: boolean;
+}
+
 export interface Handlers {
   onPhase: (phase: Phase, error?: string) => void;
   onChannels: (channels: Channel[], selfChannel: number) => void;
@@ -190,11 +205,16 @@ export interface Backend {
   deleteChannel(channelId: number): Promise<void>;
   setVoice(settings: VoiceSettings): Promise<void>;
   /**
-   * 按住 / 松开「强制发送」（Space）。
+   * 按住 / 松开。
    *
-   * 三种说话方式下按住都强制发送——这是设置页里给用户的承诺。
+   * 真机上按键**不经过这里**：窗口没焦点时前端收不到 keydown，所以全局热键在 Rust
+   * 侧直接推指令（`apps/app/src/ptt.rs`）。这里留给浏览器 Mock 与脚本联调。
    */
   setPtt(held: boolean): Promise<void>;
+  /** 按键说话的绑定与注册状态。 */
+  pttSettings(): Promise<PttSettings>;
+  /** 换一个按键，返回规范化之后的写法。认不出 / 被别的程序占了都会抛错。 */
+  setPttKey(key: string): Promise<string>;
   setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void>;
   setUser(userId: number, patch: { volume?: number; mute?: boolean; solo?: boolean }): Promise<void>;
   setView(view: View): Promise<void>;
@@ -270,6 +290,7 @@ export class MockBackend implements Backend {
   #timers: ReturnType<typeof setInterval>[] = [];
   #voice: VoiceSettings = { mode: 'vad', threshold_db: -38, preroll_frames: 3 };
   #ptt = false;
+  #pttKey = 'Ctrl+Shift+Space';
   // 单独存一份：`Net.budget` / `Net.device` 是可选字段，展开前得有个确定的类型。
   #budget = { capture: 0, chain: 0.08, encode: 0.14, network: 0.3, jitter: 14, playout: 8 };
   #device = { digital_loopback_ms: 34.3, acoustic_loopback_ms: 175.3 };
@@ -440,6 +461,19 @@ export class MockBackend implements Backend {
     this.#ptt = held;
   }
 
+  async pttSettings(): Promise<PttSettings> {
+    return {
+      key: this.#pttKey,
+      has_modifier: this.#pttKey.includes('+'),
+      registered: this.#voice.mode === 'ptt',
+    };
+  }
+
+  async setPttKey(key: string): Promise<string> {
+    this.#pttKey = key;
+    return key;
+  }
+
   async setSelf(state: { mute?: boolean; deafen?: boolean }): Promise<void> {
     // 真后端是「发一条 SetSelfState，等服务器广播 UserUpdated 回来」；Mock 里
     // 服务器不存在，就自己把那份成员表改掉——**改的是 self_mute，不是 mute**，
@@ -524,9 +558,11 @@ export class MockBackend implements Backend {
         // 它不模拟音质，只模拟**契约**——门控的判据和真后端是同一套。
         const vad = Math.min(1, self * 2.4);
         const loud = 20 * Math.log10(Math.max(self, 1e-6));
+        // 与 `audio_core::TxGate` 同一条判据：按键**只**在按住说话里算数。
         const gate =
           this.#voice.mode === 'open' ||
-          (this.#voice.mode === 'ptt' ? this.#ptt : this.#ptt || (vad >= 0.5 && loud >= this.#voice.threshold_db));
+          (this.#voice.mode === 'ptt' && this.#ptt) ||
+          (this.#voice.mode === 'vad' && vad >= 0.5 && loud >= this.#voice.threshold_db);
         this.#meters = {
           ...this.#meters,
           self_level: self,

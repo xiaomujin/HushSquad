@@ -203,7 +203,10 @@ pub enum Command {
         /// 开门时补发几帧。
         preroll_frames: u32,
     },
-    /// 按住 / 松开「强制发送」（键盘 Space）。
+    /// 按住 / 松开按键。
+    ///
+    /// **只有按住说话模式看它**：语音激活与常开下按住不会多发一个字节
+    /// （`audio_core::gate` 的 `the_key_does_nothing_outside_ptt_mode`）。
     SetPtt(bool),
     /// 把别人移到另一个频道（需要 `MOVE_ANYONE`）。
     MoveUser {

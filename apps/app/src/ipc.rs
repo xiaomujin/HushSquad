@@ -13,30 +13,53 @@
 //! | `set_self`（静音 / 闭听） | 真的（改混音器与上行） |
 //! | `set_user`（音量 / 静音 / 独听） | 真的（改本地混音器那一路） |
 //! | `set_voice`（语音激活 / 按住说话 / 常开） | 真的（上行门控，`audio_core::TxGate`） |
-//! | `set_ptt`（按住 Space 强制发送） | 真的（同上） |
+//! | `set_ptt`（按住 / 松开按键） | 真的（同上）。真机上由全局热键直接驱动，见 `ptt.rs` |
+//! | `ptt_settings` / `set_ptt_key`（按键绑定） | 真的（全局热键 + 落进本地库） |
 //! | `list_devices` | 真的（cpal 枚举 + 采样率区间） |
 //! | `selftest` | **还没有**：返回一条明确的错误，不假装在测 |
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hushsquad_client::VoiceMode;
 use hushsquad_client::config::Config;
 use hushsquad_client::host::Command;
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{AppHandle, State};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+use crate::ptt::{self, KeyBinding};
 use crate::session::{Event, Session};
 
-/// 全局状态：最多一条会话。
-#[derive(Clone, Default)]
+/// 全局状态：最多一条会话 + 上行设置。
+///
+/// 上行设置（说话方式、按键）放在这里而不是只放在会话里，是因为**热键注册与否由它们
+/// 决定**：换到语音激活要立刻把键收回来，断线也要。会话对象随时可能被换掉（重连会
+/// 新建一个），而这两个字段要跨会话存活。
+#[derive(Clone)]
 pub struct AppState {
     session: Arc<Mutex<Option<Session>>>,
+    voice: Arc<Mutex<VoiceMode>>,
+    ptt: Arc<Mutex<KeyBinding>>,
+    /// 键现在注册着吗。与 `ptt` 分开：键可以改，注册状态是运行时事实。
+    ptt_registered: Arc<AtomicBool>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            session: Arc::default(),
+            voice: Arc::new(Mutex::new(VoiceMode::Vad)),
+            ptt: Arc::new(Mutex::new(KeyBinding::default())),
+            ptt_registered: Arc::default(),
+        }
+    }
 }
 
 impl AppState {
     /// 给正在跑的会话发一条指令。
-    fn send(&self, command: Command) -> Result<(), String> {
+    pub(crate) fn send(&self, command: Command) -> Result<(), String> {
         let guard = self
             .session
             .lock()
@@ -48,6 +71,47 @@ impl AppState {
             }
             _ => Err("还没有连接".to_owned()),
         }
+    }
+
+    /// 会话还活着吗。
+    pub(crate) fn session_alive(&self) -> bool {
+        self.session
+            .lock()
+            .map(|guard| guard.as_ref().is_some_and(|session| !session.is_finished()))
+            .unwrap_or(false)
+    }
+
+    /// 当前说话方式。
+    pub(crate) fn voice_mode(&self) -> VoiceMode {
+        self.voice.lock().map(|mode| *mode).unwrap_or_default()
+    }
+
+    pub(crate) fn set_voice_mode(&self, mode: VoiceMode) {
+        if let Ok(mut slot) = self.voice.lock() {
+            *slot = mode;
+        }
+    }
+
+    /// 当前按键绑定（克隆：调用方拿去注册，不持有锁）。
+    pub(crate) fn ptt_key(&self) -> KeyBinding {
+        self.ptt
+            .lock()
+            .map(|binding| binding.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_ptt_key(&self, binding: KeyBinding) {
+        if let Ok(mut slot) = self.ptt.lock() {
+            *slot = binding;
+        }
+    }
+
+    pub(crate) fn ptt_registered(&self) -> bool {
+        self.ptt_registered.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_ptt_registered(&self, registered: bool) {
+        self.ptt_registered.store(registered, Ordering::Release);
     }
 }
 
@@ -153,33 +217,47 @@ impl ConnectRequest {
 /// 已经有会话时先停掉它（最多等 2 秒）。
 #[tauri::command]
 pub async fn connect(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: ConnectRequest,
     events: Channel<Event>,
 ) -> Result<(), String> {
-    let app = state.inner().clone();
+    let inner = state.inner().clone();
     let cfg = request.into_config()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut slot = app
+    let mode = cfg.voice;
+    let notice = events.clone();
+    let for_session = app.clone();
+    let for_blocking = inner.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut slot = for_blocking
             .session
             .lock()
             .map_err(|_| "会话状态锁中毒".to_owned())?;
         if let Some(previous) = slot.take() {
             previous.stop();
         }
-        *slot = Some(Session::start(cfg, events));
+        *slot = Some(Session::start(cfg, events, for_session));
         Ok(())
     })
     .await
-    .map_err(|error| format!("起会话失败：{error}"))?
+    .map_err(|error| format!("起会话失败：{error}"))??;
+
+    // 说话方式跟着连接一起生效：按住说话要在连上之后才注册热键（没连接时按键没意义）。
+    inner.set_voice_mode(mode);
+    if let Err(error) = ptt::sync(&app, &inner) {
+        // 注册失败不该让连接失败：会话已经在跑了，能听能说，只是没有按键。
+        let _ = notice.send(Event::Notice { message: error });
+    }
+    Ok(())
 }
 
 /// 断开。最多等 2 秒，等不到就不等了（界面不该被一个卡住的握手冻住）。
 #[tauri::command]
-pub async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    let app = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut slot = app
+pub async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let inner = state.inner().clone();
+    let for_blocking = inner.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut slot = for_blocking
             .session
             .lock()
             .map_err(|_| "会话状态锁中毒".to_owned())?;
@@ -189,7 +267,9 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
         Ok(())
     })
     .await
-    .map_err(|error| format!("停会话失败：{error}"))?
+    .map_err(|error| format!("停会话失败：{error}"))??;
+    // 会话没了，热键也该收回去（否则那个键在别的程序里会继续被吃掉）。
+    ptt::sync(&app, &inner)
 }
 
 /// 换频道。
@@ -232,26 +312,74 @@ pub fn set_user(
 }
 
 /// 换说话方式与门限。
+///
+/// 顺带同步热键：换到按住说话要注册，换走要注销。注册失败（键被别人占了）会作为
+/// 错误返回，界面把原因显示在设置页上——**不静默**，否则用户会以为按住说话坏了。
 #[tauri::command]
-pub fn set_voice(
+pub async fn set_voice(
+    app: AppHandle,
     state: State<'_, AppState>,
     mode: String,
     threshold_db: f32,
     preroll_frames: u32,
 ) -> Result<(), String> {
-    let command = VoiceSettings {
+    let settings = VoiceSettings {
         mode,
         threshold_db,
         preroll_frames,
-    }
-    .into_command()?;
-    state.send(command)
+    };
+    let mode = VoiceMode::parse(&settings.mode)?;
+    let command = settings.into_command()?;
+    state.send(command)?;
+    state.set_voice_mode(mode);
+    ptt::sync(&app, state.inner())
 }
 
-/// 按住 / 松开「强制发送」。任何模式下按住都会发（设置页里那句 Space 的承诺）。
+/// 按住 / 松开。
+///
+/// 真机上这条命令**不是**按键的入口：全局热键在 Rust 侧直接推 `Command::SetPtt`
+/// （见 `ptt.rs`），因为窗口没焦点时前端收不到 keydown。留着它是给浏览器 Mock 与
+/// 脚本联调用的——两边走的是同一个门控。
 #[tauri::command]
 pub fn set_ptt(state: State<'_, AppState>, held: bool) -> Result<(), String> {
     state.send(Command::SetPtt(held))
+}
+
+// ---------------------------------------------------------------- 按键说话（B1）
+
+/// 当前的按键绑定与注册状态。
+#[tauri::command]
+pub fn ptt_settings(state: State<'_, AppState>) -> ptt::PttView {
+    ptt::view(state.inner())
+}
+
+/// 换一个按键，返回规范化之后的写法。
+///
+/// 三步都可能失败，且失败点不同，所以错误文案要分清楚：认不出组合 / 键被别的程序
+/// 占了 / 存不下来。中间那步失败会把旧键装回去，不留一个「看起来改了其实没改」的状态。
+#[tauri::command]
+pub async fn set_ptt_key(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<String, String> {
+    let inner = state.inner().clone();
+    let binding = KeyBinding::parse(&key)?;
+    let previous = inner.ptt_key();
+    if inner.ptt_registered() {
+        // 旧的还注册着：先收回来，否则新旧两个键会同时有效。
+        let _ = app.global_shortcut().unregister(previous.shortcut());
+        inner.set_ptt_registered(false);
+    }
+    inner.set_ptt_key(binding.clone());
+    if let Err(error) = ptt::sync(&app, &inner) {
+        inner.set_ptt_key(previous);
+        let _ = ptt::sync(&app, &inner);
+        return Err(error);
+    }
+    ptt::save(&binding)
+        .map_err(|error| format!("按键已经生效，但{error}（下次启动会回到默认）"))?;
+    Ok(binding.display().to_owned())
 }
 
 // ---------------------------------------------------------------- 管理（ADR-0016）

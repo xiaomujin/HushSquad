@@ -323,6 +323,8 @@ input[type='range']::-webkit-slider-thumb:hover { background: var(--tx); }
   cursor: pointer; color: var(--tx2); background: var(--surf2); border: 1px solid var(--line);
 }
 .btn:hover { color: var(--tx); border-color: var(--line2); }
+/* 正在「等按键」的那颗按钮：与底栏的「开着」用同一套强调色。 */
+.btn.on { color: var(--acc); border-color: var(--acc-dim); background: var(--acc-bg); }
 /* 还没接上的按钮：能看见、点不动、看得出为什么（旁边一定有说明）。 */
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn:disabled:hover { color: var(--tx2); border-color: var(--line); }

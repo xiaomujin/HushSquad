@@ -31,6 +31,17 @@ class AppState {
   // 3 帧 = 30 ms。再多就要拿延迟换（补发是一次性突发，会挤爆对方的抖动缓冲），
   // 见 ADR-0015。
   voice = $state<VoiceSettings>({ mode: 'vad', threshold_db: -38, preroll_frames: 3 });
+  /**
+   * 按键说话的键（显示写法）。
+   *
+   * 真机上的真相在 Rust 侧（`apps/app/src/ptt.rs`）：它负责注册全局热键、落库、
+   * 换模式时注销。这里只是最近一次读到的镜像，改键走 `backend.setPttKey`。
+   */
+  pttKey = $state('Ctrl+Shift+Space');
+  /** 这个键有没有修饰键。没有就意味着它在所有程序里都没了。 */
+  pttHasModifier = $state(true);
+  /** 现在注册着吗（= 按住说话模式 + 已连接）。 */
+  pttRegistered = $state(false);
   chain = $state('highpass,rnn,agc2');
   addr = $state('127.0.0.1:64738');
 
