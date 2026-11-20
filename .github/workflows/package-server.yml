@@ -1,0 +1,126 @@
+name: 服务器包（Linux）
+
+# 打 Linux 服务器端的发布包：静态 musl 二进制 + systemd unit + install.sh + 部署文档，
+# 一个 tar.gz 解包后 `sudo ./install.sh --voice-host <地址>` 就能跑。
+#
+# 为什么在 CI 里打而不是本机交叉编译：本机是 Windows，没有 Docker/WSL/zig，
+# 而服务器依赖里有 C 代码（SQLite bundled、ring、aws-lc），
+# 交叉编译要先搞一套 Linux 的 C 工具链；ubuntu-latest 上这些都是现成的。
+#
+# 触发：
+#   Actions 页面手动 Run workflow（可填版本号）
+#   push tag `server-v*`
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号（留空 = 0.0.0-g<短 sha>）
+        required: false
+        default: ""
+  push:
+    tags:
+      - "server-v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # musl 静态链接：不依赖目标机的 glibc 版本，Debian/CentOS/Alpine 上都能直接跑。
+  # 用 gnu 的话，ubuntu-24.04 上编出来的二进制要求 glibc >= 2.39，
+  # 在 Debian 12（2.36）/ CentOS Stream 9 上会直接 "GLIBC_2.39 not found"。
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  package:
+    name: 打包（${{ github.event_name == 'workflow_dispatch' && '手动' || github.ref_name }}）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 版本号
+        id: ver
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            v="0.0.0-g$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "本次版本：$v"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      # musl-tools 给 C 依赖（libsqlite3-sys / ring / aws-lc-sys）一个 musl 的 cc；
+      # cmake 是 aws-lc-sys 找得到的构建后端；file 用来验证产物确实是 ELF。
+      - name: 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools cmake file
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: 编译（release）
+        run: cargo build --release -p hushsquad-server --target "$TARGET"
+
+      # 静态链接是这份包的全部价值：动态链接的话，目标机缺库就白打。
+      - name: 验证是静态二进制
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/hushsquad-server"
+          file "$bin"
+          if ldd "$bin" 2>&1 | grep -Eq 'not a dynamic executable|statically linked'; then
+            echo "OK：静态链接，不依赖目标机 libc"
+          else
+            echo "FAIL：不是静态二进制，这个包换台机器就可能跑不起来" >&2
+            ldd "$bin" || true
+            exit 1
+          fi
+          echo "大小：$(du -h "$bin" | cut -f1)"
+
+      - name: 组装发布包
+        run: |
+          bash scripts/package-server.sh \
+            "target/$TARGET/release/hushsquad-server" \
+            "$TARGET" \
+            "${{ steps.ver.outputs.version }}" \
+            dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hushsquad-server-${{ steps.ver.outputs.version }}-${{ env.TARGET }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 90
+
+      # Release 是给「不登录 GitHub 也能下载」用的：artifact 要登录才能下。
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: server-v${{ steps.ver.outputs.version }}
+          name: 服务器包 v${{ steps.ver.outputs.version }}
+          body: |
+            Linux 服务器端发布包（静态 musl，x86_64）。
+
+            ```bash
+            tar xzf hushsquad-server-*.tar.gz
+            cd hushsquad-server-*
+            sudo ./install.sh --voice-host <你的公网IP或域名>
+            ```
+
+            包内：`hushsquad-server`（静态二进制）、`hushsquad-server.service`（systemd）、
+            `install.sh`、`部署.md`、`VERSION`。
+
+            用之前先看一眼 `部署.md` §2：账号库与自签证书都是第一次启动时自动生成的，
+            不需要准备任何文件；云服务器记得 `--voice-host` 指向公网地址。
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

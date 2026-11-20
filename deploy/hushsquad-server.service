@@ -27,11 +27,14 @@ ExecStart=/usr/local/bin/hushsquad-server \
     --db /var/lib/hushsquad/hushsquad.db \
     --cert /var/lib/hushsquad/cert.pem \
     --key /var/lib/hushsquad/key.pem \
-    --control-bind 0.0.0.0:64738 \
+    --bind 0.0.0.0:64738 \
     --voice-bind 0.0.0.0:64739 \
-    --voice-host voice.example.com \
     --channel 大厅 --channel 游戏 \
     --metrics-interval 60
+
+# 注意 `--bind` 是控制面监听（`--control-bind` 不是有效参数，写了会「未知参数」退出）。
+# 云服务器必须再加 `--voice-host <公网IP或域名>`，否则客户端拿到的语音地址是内网 IP：
+#   --voice-host voice.example.com \
 
 Restart=on-failure
 RestartSec=3

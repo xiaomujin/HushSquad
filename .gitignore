@@ -6,6 +6,8 @@
 # 构建与测量产物
 /out
 **/*.report.json
+# 发布包（scripts/package-server.sh 的输出）
+/dist
 
 # 服务器零配置启动时在当前目录自签出来的证书与账号库
 /hushsquad-cert.pem

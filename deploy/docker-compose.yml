@@ -26,7 +26,7 @@ services:
       - /data/cert.pem
       - --key
       - /data/key.pem
-      - --control-bind
+      - --bind
       - 0.0.0.0:64738
       - --voice-bind
       - 0.0.0.0:64739
