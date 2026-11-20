@@ -83,6 +83,33 @@ jobs:
           fi
           echo "大小：$(du -h "$bin" | cut -f1)"
 
+      - name: 冒烟（二进制在 Linux 上真能跑）
+        # 静态 musl 的价值就是「不依赖目标机」，所以这里真跑一次：
+        # --help 证明能加载并执行；起一次服务证明它能建库、建证书、绑端口、打横幅。
+        run: |
+          set -euo pipefail
+          bin="${{ github.workspace }}/target/$TARGET/release/hushsquad-server"
+          "$bin" --help > /dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          set +e
+          timeout -k 2 5 "$bin" --bind 127.0.0.1:0 --voice-bind 127.0.0.1:0 \
+            --voice-port 64739 --metrics-interval 0 > banner.txt 2>&1
+          code=$?
+          set -e
+          head -n 20 banner.txt
+          # 124 = timeout 到点把它杀了，说明它一直在跑（正常）
+          if [ "$code" -ne 124 ] && [ "$code" -ne 0 ]; then
+            echo "FAIL：服务器启动即退出（exit $code）" >&2
+            exit 1
+          fi
+          grep -q "HushSquad 服务器已启动" banner.txt || {
+            echo "FAIL：没打印启动横幅" >&2
+            exit 1
+          }
+          echo "OK：能起服务、能打横幅"
+
       - name: 组装发布包
         run: |
           bash scripts/package-server.sh \
