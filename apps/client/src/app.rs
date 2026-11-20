@@ -528,7 +528,9 @@ async fn run_inner(cfg: Config, host: Option<&dyn Host>) -> Result<Summary, Stri
             host: cfg.server.clone(),
         }
     };
-    let mut control = control::connect(&cfg.server, &trust, cfg.server_name()).await?;
+    // control_peer 是握手实际用到的地址，语音面地址为空时要复用它（见下面第 3 步）。
+    let (mut control, control_peer) =
+        control::connect(&cfg.server, &trust, cfg.server_name()).await?;
     if cfg.insecure {
         eprintln!("警告：--insecure 已关闭证书校验。只在本机/内网联调用，中间人可以冒充服务器。");
     }
@@ -610,11 +612,18 @@ async fn run_inner(cfg: Config, host: Option<&dyn Host>) -> Result<Summary, Stri
     }
 
     // ---- 3. 语音面绑定 ----
-    let (voice_host, voice_port) = {
+    // 协议里 voice_host 为空 = 「沿用你连控制面用的地址」。这里复用握手实际用到的那个 IP，
+    // 而不是重新解析 --server 里的主机名：域名解析到多台机器时，重解析可能落到另一台，
+    // 那台的会话表里没有我们，表现就是「控制面正常、语音 BindAck 超时」。
+    // 服务器显式给了 voice_host（语音在另一台/另一 IP）时照旧用它。
+    let voice_addr = {
         let (host, port) = client.voice_endpoint();
-        (host.to_owned(), port)
+        if host.is_empty() {
+            SocketAddr::new(control_peer.ip(), port)
+        } else {
+            resolve(host, port).await?
+        }
     };
-    let voice_addr = resolve(&voice_host, voice_port).await?;
     let udp = crate::voice::bind(&cfg.bind, voice_addr).await?;
     send_bind(&udp, &client).await?;
     wait_bind_ack(&udp, &mut client).await?;

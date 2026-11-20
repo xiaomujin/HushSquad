@@ -79,7 +79,10 @@ message ServerHello {
   string server_version = 2;
   uint64 session_id = 3;
   uint32 sender_id = 4;           // 语音包标识，会话内不复用
-  string voice_host = 5;          // 语音面地址（域名或 IP）
+  string voice_host = 5;          // 语音面地址（域名或 IP）。
+                                  // **空 = 沿用客户端连控制面时实际用到的地址**：
+                                  // 云主机（网卡是内网 IP、公网靠 NAT）与局域网都靠这个默认值
+                                  // 自动正确；只有语音面在另一台机器/另一个对外 IP 时才填。
   uint32 voice_port = 6;
   bytes  voice_token = 7;         // 16 B，UDP Bind 凭证
   uint32 key_epoch = 8;           // 当前语音密钥版本

@@ -362,19 +362,11 @@ pub fn run(config: Config) -> Result<(), String> {
     // 老库升级：以前没有「服主」这个概念，这里补一个，否则服务器没人能管。
     let promoted = ensure_owner(&auth)?;
 
-    // 语音面地址：没显式给就猜一个局域网 IP —— 猜错了客户端只会连不上语音面，
-    // 启动横幅里那句「对外宣告」能让用户一眼看出该改哪里。
-    let voice_host = match &config.voice_host {
-        Some(host) => host.clone(),
-        None => cert::local_ip().map_or_else(
-            || {
-                eprintln!("警告：猜不出本机局域网地址，语音面默认宣告 127.0.0.1（只有本机能连）。");
-                eprintln!("      用 --voice-host <你的IP或域名> 指定。");
-                "127.0.0.1".to_owned()
-            },
-            |ip| ip.to_string(),
-        ),
-    };
+    // 语音面地址：默认**不宣告**。空串的含义是「沿用客户端连控制面用的地址」，
+    // 于是云主机（网卡上只有内网 IP、公网靠 NAT）和局域网都自动正确 ——
+    // 以前这里猜一个本机 IP，云主机上猜出来是 10.x，客户端照着连就永远通不了。
+    // 只有语音面真的在另一台机器 / 另一个对外 IP 时，才需要 --voice-host 显式指定。
+    let voice_host = config.voice_host.clone().unwrap_or_default();
     let voice_port = config.voice_port();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -419,10 +411,13 @@ pub fn run(config: Config) -> Result<(), String> {
 
         println!("HushSquad 服务器已启动");
         println!("  控制面    {}", config.control_bind);
-        println!(
-            "  语音面    {}（对外宣告 {voice_host}:{voice_port}）",
-            config.voice_bind
-        );
+        let announced = if voice_host.is_empty() {
+            // 空 = 客户端沿用自己连控制面用的地址，这里没有具体主机可打印。
+            format!("跟随客户端（端口 {voice_port}）")
+        } else {
+            format!("{voice_host}:{voice_port}")
+        };
+        println!("  语音面    {}（对外宣告 {announced}）", config.voice_bind);
         println!("  账号库    {}", config.db.display());
         println!("  频道      {channel_note}");
         if restored > 0 && config.channels != vec!["大厅".to_owned()] {

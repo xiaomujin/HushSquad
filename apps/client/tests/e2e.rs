@@ -34,6 +34,15 @@ struct Harness {
 
 impl Harness {
     fn start(runtime: &tokio::runtime::Runtime, users: &[(&str, &str)]) -> Self {
+        Self::start_with_voice_host(runtime, users, "127.0.0.1")
+    }
+
+    /// `voice_host` 传 `""` 就是「服务器不宣告语音地址」那种部署（云主机的默认形态）。
+    fn start_with_voice_host(
+        runtime: &tokio::runtime::Runtime,
+        users: &[(&str, &str)],
+        voice_host: &str,
+    ) -> Self {
         let generated =
             rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("生成证书");
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -51,7 +60,7 @@ impl Harness {
         let acceptor = control::load_tls(&cert, &key).expect("加载 TLS");
         let auth_db = dir.join("server.db");
         let (shared, control_addr, control_task, voice_task) =
-            runtime.block_on(setup(acceptor, users, &auth_db));
+            runtime.block_on(setup(acceptor, users, &auth_db, voice_host));
 
         Self {
             shared,
@@ -102,6 +111,7 @@ async fn setup(
     acceptor: TlsAcceptor,
     users: &[(&str, &str)],
     auth_db: &std::path::Path,
+    voice_host: &str,
 ) -> (Arc<Shared>, SocketAddr, JoinHandle<()>, JoinHandle<()>) {
     let (udp, voice_addr) = voice::bind("127.0.0.1:0").await.expect("绑语音面");
 
@@ -113,8 +123,9 @@ async fn setup(
         }
     });
     let mut server = Server::new(ServerConfig {
-        // 用字面 IP：客户端要 lookup 它，别让 localhost 解析到 ::1 上去。
-        voice_host: "127.0.0.1".to_owned(),
+        // 默认用字面 IP：客户端要 lookup 它，别让 localhost 解析到 ::1 上去。
+        // 传空串的那条用例走的是「客户端沿用控制面对端地址」，不需要 lookup。
+        voice_host: voice_host.to_owned(),
         voice_port: voice_addr.port(),
         ..ServerConfig::default()
     });
@@ -124,7 +135,7 @@ async fn setup(
     let shared = Arc::new(Shared {
         server: std::sync::Mutex::new(server),
         outbox: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-        voice_host: "127.0.0.1".to_owned(),
+        voice_host: voice_host.to_owned(),
         voice_port: voice_addr.port(),
         metrics_interval: Duration::from_secs(3600),
         connections: AtomicU64::new(0),
@@ -225,6 +236,45 @@ fn using_only_a_server_address_works_and_is_anonymous() {
     assert!(metrics.fanout_copies > 0, "服务器没做过 fan-out");
     drop(server);
     assert_eq!(harness.anonymous_count(), 2, "两台机器应当各建一个匿名账号");
+}
+
+#[test]
+fn empty_voice_host_follows_the_control_connection() {
+    // 云主机的默认形态：服务器不宣告语音地址（`ServerHello.voice_host = ""`），
+    // 客户端得沿用自己连控制面时**实际用到的那个地址**。
+    // 这条测试是那个默认值的机器证明 —— 以前服务器会猜一个本机局域网 IP，
+    // 云主机上猜出来是 10.x，客户端照着连，语音面就永远通不了。
+    let runtime = runtime();
+    let harness = Harness::start_with_voice_host(&runtime, &[], "");
+    let sender_db = harness.dir.join("sender.db");
+    let receiver_db = harness.dir.join("receiver.db");
+
+    let mut sender_config = harness.config(&[], &sender_db);
+    sender_config.tone = Some(440.0);
+    let receiver_config = harness.config(&[], &receiver_db);
+
+    let sender = spawn_client(sender_config);
+    let receiver = spawn_client(receiver_config);
+    let sender = sender.join().expect("线程没 panic").expect("发送端跑失败");
+    let receiver = receiver
+        .join()
+        .expect("线程没 panic")
+        .expect("接收端跑失败");
+
+    assert!(
+        sender.frames_out > 250,
+        "上行太少：{} 包",
+        sender.frames_out
+    );
+    assert!(
+        receiver.frames_in > 100,
+        "语音面没通：只收到 {} 包（voice_host 为空时应当沿用控制面的对端地址）",
+        receiver.frames_in
+    );
+    assert_eq!(receiver.recv_errors, 0, "有包解不开");
+
+    let server = harness.shared.server.lock().expect("锁没中毒");
+    assert_eq!(server.metrics().binds, 2, "两个客户端都该绑定语音面");
 }
 
 #[test]

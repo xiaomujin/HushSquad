@@ -4,11 +4,12 @@
 # 做的事：建系统用户 → 装二进制 → 装 systemd unit → 建数据目录 → 启动。
 # 账号库与自签证书都在第一次启动时自动生成，不需要准备任何文件。
 #
-#   sudo ./install.sh --voice-host voice.example.com
+#   sudo ./install.sh
 #
 # 参数：
-#   --voice-host <主机>  写进 ServerHello 让客户端去连的语音地址（公网 IP 或域名）。
-#                        不给的话服务器只能宣告本机局域网 IP —— 云服务器上客户端连不上。
+#   --voice-host <主机>  可选。默认**不宣告**语音地址：客户端会沿用自己连控制面时用的那个
+#                        地址，云主机（网卡是内网 IP、公网靠 NAT）与局域网都自动正确。
+#                        只有语音面在另一台机器 / 另一个对外 IP 时才需要给。
 #   --data <目录>        数据目录（账号库 + 证书），默认 /var/lib/hushsquad
 #   --prefix <目录>      安装前缀，默认 /usr/local
 #   --no-start           只安装，不启动服务
@@ -25,7 +26,8 @@ START=1
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
-    sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # 打印文件开头的注释块：从第 2 行到第一个空行为止（加参数不会把 help 打歪）。
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -71,7 +73,7 @@ if ! "$PREFIX/bin/$BIN_NAME" --help >/dev/null 2>&1; then
     echo "警告：$PREFIX/bin/$BIN_NAME --help 执行失败，检查这个包是不是给本机架构的" >&2
 fi
 
-# 6. systemd unit（--voice-host 是安装期决定的，所以在这里拼进去）
+# 6. systemd unit（--voice-host 给了才拼进去；不给就是默认的「跟随客户端」）
 if command -v systemctl >/dev/null 2>&1; then
     unit_tmp=$(mktemp)
     if [ -n "$VOICE_HOST" ]; then
@@ -85,10 +87,10 @@ if command -v systemctl >/dev/null 2>&1; then
             }
             { print }
         ' "$HERE/$BIN_NAME.service" > "$unit_tmp"
+        echo "语音面地址：宣告 $VOICE_HOST（--voice-host 覆盖）"
     else
         cp "$HERE/$BIN_NAME.service" "$unit_tmp"
-        echo "警告：没给 --voice-host，服务器会宣告本机局域网 IP。云服务器上客户端连不上，" >&2
-        echo "      改 /etc/systemd/system/$BIN_NAME.service 加上 --voice-host 再重启。" >&2
+        echo "语音面地址：跟随客户端连接地址（没有给 --voice-host，这是默认）"
     fi
     install -Dm644 "$unit_tmp" "/etc/systemd/system/$BIN_NAME.service"
     rm -f "$unit_tmp"

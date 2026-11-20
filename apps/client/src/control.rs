@@ -108,23 +108,32 @@ pub fn client_config(trust: &Trust) -> Result<Arc<rustls::ClientConfig>, String>
 }
 
 /// 连上控制面并完成 TLS 握手。
+///
+/// 第二个返回值是**实际连上的对端地址**。语音面地址在协议里可以是空串，
+/// 意思是「沿用你连控制面用的那个地址」；而域名可能解析到多台机器，
+/// 重新解析未必还是这一台（那台的会话表里没有我们，语音就通不了），
+/// 所以这里把握手用的地址带出去，让调用方直接复用。
 pub async fn connect(
     addr: &str,
     trust: &Trust,
     server_name: &str,
-) -> Result<TlsStream<TcpStream>, String> {
+) -> Result<(TlsStream<TcpStream>, std::net::SocketAddr), String> {
     let config = client_config(trust)?;
     let tcp = TcpStream::connect(addr)
         .await
         .map_err(|e| format!("连不上 {addr}：{e}"))?;
+    let peer = tcp
+        .peer_addr()
+        .map_err(|e| format!("连上了 {addr}，但取不到对端地址：{e}"))?;
     // 控制面全是小消息（心跳、成员变化），Nagle 只会白加 40 ms。
     tcp.set_nodelay(true).ok();
     let name = ServerName::try_from(server_name.to_owned())
         .map_err(|e| format!("证书名 {server_name:?} 不合法：{e}"))?;
-    TlsConnector::from(config)
+    let stream = TlsConnector::from(config)
         .connect(name, tcp)
         .await
-        .map_err(|e| explain_handshake(e, trust))
+        .map_err(|e| explain_handshake(e, trust))?;
+    Ok((stream, peer))
 }
 
 /// 把 rustls 的握手错误翻成「该怎么办」。

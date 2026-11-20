@@ -30,8 +30,11 @@ services:
       - 0.0.0.0:64738
       - --voice-bind
       - 0.0.0.0:64739
-      - --voice-host
-      - voice.example.com
+      # 语音面地址默认**不宣告**：客户端沿用自己连控制面用的那个地址，
+      # 云主机（网卡是内网 IP、公网靠 NAT）与局域网都自动正确。
+      # 语音面在另一台机器 / 另一个对外 IP 时才打开这两行：
+      # - --voice-host
+      # - voice.example.com
       - --voice-port
       - "64739"
       - --channel
